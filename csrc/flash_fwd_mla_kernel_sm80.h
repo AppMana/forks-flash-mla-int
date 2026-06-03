@@ -49,7 +49,7 @@ struct Flash_fwd_kernel_traits_mla {
     static_assert(kHeadDimV <= kHeadDim);
     static constexpr int kBlockKSmem = kHeadDim % 64 == 0 ? 64 : 32;
     static constexpr int kSwizzle = kBlockKSmem == 32 ? 2 : 3;
-    static constexpr int kNumInnerStagesK = 3;
+    static constexpr int kNumInnerStagesK = kHeadDim % 3 == 0 ? 3 : 2;
     static_assert(kHeadDim % kNumInnerStagesK == 0, "kHeadDim must be divisible by kNumInnerStagesK");
 
     using MMA_Atom_Arch = MMA_Atom<SM80_16x8x16_F32BF16BF16F32_TN>;
@@ -703,10 +703,10 @@ void run_flash_splitkv_fwd_mla(Flash_fwd_mla_params &params, cudaStream_t stream
 template<typename T, int Headdim>
 struct mha_fwd_splitkv_mla<T, Headdim, false> {
     static void run(Flash_fwd_mla_params &params, cudaStream_t stream) {
-        static_assert(Headdim == 576);
+        static_assert(Headdim == 576 || Headdim == 512);
         FLASH_ASSERT(params.d_v == 512);
         FLASH_ASSERT(params.k_ptr == params.v_ptr);  // Shared_KV
-        using Kernel_traits = Flash_fwd_kernel_traits_mla<576, 32, 32, 8, T, 512>;
+        using Kernel_traits = Flash_fwd_kernel_traits_mla<Headdim, 32, 32, 8, T, 512>;
         run_flash_splitkv_fwd_mla<Kernel_traits, flash::SharedStorageMLA<Kernel_traits>>(params, stream);
     }
 };

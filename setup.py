@@ -239,6 +239,16 @@ def get_features_args():
     return features_args
 
 
+def get_cuda_include_dirs():
+    include_dirs = []
+    cuda_home = os.getenv("CUDA_HOME")
+    if cuda_home:
+        cccl_include = Path(cuda_home) / "targets" / "x86_64-linux" / "include" / "cccl"
+        if cccl_include.exists():
+            include_dirs.append(cccl_include)
+    return include_dirs
+
+
 subprocess.run(["git", "submodule", "update", "--init", "csrc/cutlass"])
 
 cc_flag = []
@@ -287,7 +297,7 @@ ext_modules.append(
         include_dirs=[
             Path(this_dir) / "csrc",
             Path(this_dir) / "csrc" / "cutlass" / "include",
-        ],
+        ] + get_cuda_include_dirs(),
     )
 )
 

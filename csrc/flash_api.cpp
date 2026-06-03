@@ -190,15 +190,24 @@ mha_fwd_kvcache_mla(
 
     auto stream = at::cuda::getCurrentCUDAStream().stream();
 
-    TORCH_CHECK(head_size == 576);
+    TORCH_CHECK(head_size == 576 || head_size == 512);
 
     if (q_dtype == torch::kBFloat16) {
         if (is_sm90) {
+            TORCH_CHECK(head_size == 576, "sm90 path currently supports head_size=576 only");
             mha_fwd_splitkv_mla<cutlass::bfloat16_t, 576, true>::run(params, stream);
         } else if (warp_spec) {
-            mha_fwd_splitkv_mla_ws<cutlass::bfloat16_t, 576>::run(params, stream);
+            if (head_size == 512) {
+                mha_fwd_splitkv_mla<cutlass::bfloat16_t, 512, false>::run(params, stream);
+            } else {
+                mha_fwd_splitkv_mla_ws<cutlass::bfloat16_t, 576>::run(params, stream);
+            }
         } else {
-            mha_fwd_splitkv_mla<cutlass::bfloat16_t, 576, false>::run(params, stream);
+            if (head_size == 512) {
+                mha_fwd_splitkv_mla<cutlass::bfloat16_t, 512, false>::run(params, stream);
+            } else {
+                mha_fwd_splitkv_mla<cutlass::bfloat16_t, 576, false>::run(params, stream);
+            }
         }
     }
     #ifndef FLASH_MLA_DISABLE_FP16
