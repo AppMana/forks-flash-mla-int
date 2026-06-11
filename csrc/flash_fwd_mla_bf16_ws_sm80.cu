@@ -36,7 +36,20 @@ void mha_fwd_splitkv_mla_ws<cutlass::bfloat16_t, 576>::run(Flash_fwd_mla_params 
     // kNWarpsS=4 → 4 consumer + 4 producer (default)
     // kNWarpsS=2 → 2 consumer + 6 producer
     using Kernel_traits = Flash_fwd_kernel_traits_mla_ws<576, 32, 32, 8, 4, cutlass::bfloat16_t, 512>;
-    run_flash_splitkv_fwd_mla_ws<Kernel_traits, flash::SharedStorageMLA_WS<Kernel_traits>>(params, stream);
+    using SharedStorage = flash::SharedStorageMLA_WS<Kernel_traits>;
+    // The warp-specialized pipeline requires double-buffered K and has no
+    // single-buffer mode; on devices that cannot grant its SharedStorage
+    // (sm_86: 101376 B opt-in), fall back to the plain SM80 kernel, which
+    // dispatches its own kP=1 variant there.
+    int device = 0, smem_optin = 0;
+    CHECK_CUDA(cudaGetDevice(&device));
+    CHECK_CUDA(cudaDeviceGetAttribute(
+        &smem_optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
+    if ((int)sizeof(SharedStorage) > smem_optin) {
+        mha_fwd_splitkv_mla<cutlass::bfloat16_t, 576, false>::run(params, stream);
+        return;
+    }
+    run_flash_splitkv_fwd_mla_ws<Kernel_traits, SharedStorage>(params, stream);
 }
 
 template struct mha_fwd_splitkv_mla_ws<cutlass::bfloat16_t, 576>;
