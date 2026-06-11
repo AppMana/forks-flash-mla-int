@@ -81,9 +81,23 @@ struct Flash_fwd_kernel_traits_mla {
     // restructures the next-K prefetch to after the PV GEMM in that case.
     static_assert(kPipe_ == 1 || kPipe_ == 2, "kPipe must be 1 or 2");
     using kP = Int<kPipe_>; // pipeline count
-    using SmemLayoutK = decltype(tile_to_shape(
-            getSmemLayoutK<Element, kHeadDim, kHeadDimV>(),
-            Shape<Int<kBlockN>, Int<kHeadDim>, kP>{}));
+    // kPipe_=1 layouts cannot be built by tile_to_shape over a pipe extent
+    // of 1: that emits a compound (_1,_1):(_0,_0) trailing mode that breaks
+    // the shape_div bookkeeping of the V-transpose composition below
+    // (dividing the kHeadDim=576 -> (64,9) column mode). Build the pipe-free
+    // layout first, compose, then append a clean _1:_0 pipe mode.
+    static constexpr auto make_smem_layout_k() {
+        if constexpr (kPipe_ == 1) {
+            auto inner = tile_to_shape(getSmemLayoutK<Element, kHeadDim, kHeadDimV>(),
+                                       Shape<Int<kBlockN>, Int<kHeadDim>>{});
+            return composition(inner.layout_a(), inner.offset(),
+                               append(inner.layout_b(), make_layout(Int<1>{}, Int<0>{})));
+        } else {
+            return tile_to_shape(getSmemLayoutK<Element, kHeadDim, kHeadDimV>(),
+                                 Shape<Int<kBlockN>, Int<kHeadDim>, kP>{});
+        }
+    }
+    using SmemLayoutK = decltype(make_smem_layout_k());
     using SmemLayoutSplitK = decltype(composition(
         SmemLayoutK{}, make_layout(Shape<Int<kBlockN>, Int<kHeadDim/kNumInnerStagesK>, Int<kNumInnerStagesK>, kP>{})));
 
@@ -92,10 +106,21 @@ struct Flash_fwd_kernel_traits_mla {
             Shape<Int<kBlockN>, Int<kHeadDimV>, kP>{}));
     // Use SmemLayoutK (not SmemLayoutV) so the pipeline stride matches the actual K buffer layout.
     // SmemLayoutV has pipeline stride cosize(32,512)=16384, but K data for pipe=1 starts at cosize(32,576)=18432.
-    // With kPipe_=1 the pipe mode has extent 1; give it stride 0 (broadcast)
-    // so the cute composition's shape_div stays inside the single buffer.
-    static constexpr int kVtPipeStride = kPipe_ == 1 ? 0 : kHeadDim * kBlockN;
-    using SmemLayoutVtransposed = decltype(composition(SmemLayoutK{}, make_layout(Shape<Int<kHeadDimV>, Int<kBlockN>, kP>{}, Stride<Int<kBlockN>,_1, Int<kVtPipeStride>>{})));
+    static constexpr auto make_smem_layout_vt() {
+        if constexpr (kPipe_ == 1) {
+            auto inner = tile_to_shape(getSmemLayoutK<Element, kHeadDim, kHeadDimV>(),
+                                       Shape<Int<kBlockN>, Int<kHeadDim>>{});
+            auto vt_inner = composition(inner, make_layout(Shape<Int<kHeadDimV>, Int<kBlockN>>{},
+                                                           Stride<Int<kBlockN>, _1>{}));
+            return composition(vt_inner.layout_a(), vt_inner.offset(),
+                               append(vt_inner.layout_b(), make_layout(Int<1>{}, Int<0>{})));
+        } else {
+            return composition(SmemLayoutK{},
+                               make_layout(Shape<Int<kHeadDimV>, Int<kBlockN>, kP>{},
+                                           Stride<Int<kBlockN>, _1, Int<kHeadDim * kBlockN>>{}));
+        }
+    }
+    using SmemLayoutVtransposed = decltype(make_smem_layout_vt());
 
     static constexpr int kBlockKSmemP = kBlockN % 64 == 0 ? 64 : 32;
     static constexpr int kSwizzleP = kBlockKSmemP == 32 ? 2 : 3;
@@ -770,7 +795,7 @@ struct mha_fwd_splitkv_mla<T, Headdim, false> {
         if ((int)sizeof(flash::SharedStorageMLA<Kernel_traits2>) <= smem_optin) {
             run_flash_splitkv_fwd_mla<Kernel_traits2, flash::SharedStorageMLA<Kernel_traits2>>(params, stream);
         } else {
-#ifdef FLASH_MLA_ENABLE_KP1
+#ifndef FLASH_MLA_DISABLE_KP1
             // WIP: the kPipe_=1 traits do not compile yet. With kP=1,
             // tile_to_shape flattens SmemLayoutK's 576 = 64x9 column
             // structure such that the SmemLayoutVtransposed composition

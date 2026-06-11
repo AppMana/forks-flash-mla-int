@@ -85,13 +85,20 @@ Implemented and committed:
 - Runtime dispatch in `mha_fwd_splitkv_mla::run` via
   `cudaDevAttrMaxSharedMemoryPerBlockOptin`.
 
-Remaining compile blocker (kP=1 instantiation guarded behind
-`-DFLASH_MLA_ENABLE_KP1`): with kP=1, `tile_to_shape` flattens
-`SmemLayoutK`'s 576 = 64x9 column structure such that the
-`SmemLayoutVtransposed` composition fails `shape_div` (dividing the `C<9>`
-mode for the 512-column V view); pipe-mode strides 18432, 1, and 0 all fail
-identically, so the issue is the mode flattening, not the pipe stride. Next
-attempts: build the inner (kBlockN, kHeadDim) tiling first and
-`append<3>()` the trivial pipe mode so the kP=2 mode structure is preserved,
-or slice the pipe mode out of `SmemLayoutK` before the transpose composition
-and re-append it.
+Compile blocker RESOLVED the same day: `tile_to_shape` over a pipe extent
+of 1 emits a compound `(_1,_1):(_0,_0)` trailing mode that breaks the
+composition's shape_div bookkeeping (verified with standalone cute probes;
+the identical rank-2 composition succeeds against the kP=2 layout). Fix:
+for kPipe_=1, build the pipe-free `(kBlockN, kHeadDim)` layout first,
+compose the V-transpose in rank 2, then append a clean `_1:_0` pipe mode to
+both `SmemLayoutK` and `SmemLayoutVtransposed` (constexpr builder functions
+in the traits). The kP=1 path is enabled by default
+(`#ifndef FLASH_MLA_DISABLE_KP1`).
+
+**Validation 2026-06-10 on RTX A5000 (sm_86)**: `tests/test_flash_mla_sm80.py`
+passes all 32 configurations (b=128, s in 4096/8192, h_q in 16/32/64/128,
+s_q in 1/2, varlen both; cos_diff < 8e-5 vs the FP32 torch reference on out
+and lse), ~39-41 TFLOPS and up to ~171 GB/s with the single-buffered
+pipeline. This is the first time the kernel runs on sm_86 at all. Follow-up
+perf work: restore load/compute overlap at kNumInnerStagesK (192-column)
+granularity within the single-buffer budget.
