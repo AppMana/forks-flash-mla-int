@@ -102,3 +102,24 @@ and lse), ~39-41 TFLOPS and up to ~171 GB/s with the single-buffered
 pipeline. This is the first time the kernel runs on sm_86 at all. Follow-up
 perf work: restore load/compute overlap at kNumInnerStagesK (192-column)
 granularity within the single-buffer budget.
+
+## Fork integration map (recon 2026-06-11)
+
+The vLLM fork already contains a complete `flashmla_sparse` attention backend
+(`vllm/v1/attention/backends/mla/flashmla_sparse.py`) that consumes the V4
+`fp8_ds_mla` main-MLA cache (584 B/token: 448 B fp8 NoPE + 128 B bf16 RoPE +
+8 B scale) and calls `flash_mla_with_kvcache` (dense/indices path) and
+`flash_mla_sparse_fwd` (sparse path) from the flash_mla package. It is gated
+at `supports_compute_capability: major in [9, 10]`.
+
+Integration deltas for sm_86, in order:
+
+1. This repo: a sparse forward (`flash_mla_sparse_fwd`) sm_86 variant, and
+   `fp8_ds_mla` ingest for the kP=1 kernel (decode fp8 NoPE arithmetically,
+   or natively once the INT8 main-KV half of the int8-cache campaign lands;
+   RoPE part is already bf16).
+2. vLLM fork: extend the capability gate to major 8 behind a flag, plus any
+   sm-count/num_sm_parts metadata differences.
+
+The plain BF16 dense kernel validated on the A5000 is the foundation; the
+sparse + fp8_ds_mla deltas are the remaining kernel work.
