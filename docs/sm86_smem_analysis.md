@@ -73,3 +73,25 @@ blocks.
 - Build: `CPATH=/usr/local/cuda/include/cccl TORCH_CUDA_ARCH_LIST=8.6
   MAX_JOBS=16 uv pip install -e . --no-build-isolation --python <venv>/bin/python`.
 - Test (script-style, not pytest): `python tests/test_flash_mla_sm80.py`.
+
+## kP=1 implementation status (2026-06-10, branch appmana/sm86-smem-analysis)
+
+Implemented and committed:
+
+- `kPipe_` trait parameter (1 or 2) with the kP=2 default byte-identical.
+- Both pipeline loops restructured under `if constexpr (kP == 1)`: top-of-loop
+  prefetch removed, `cp_async_wait<0>` before compute, and the next-K issue
+  moved to after the PV GEMM behind a `__syncthreads()` WAR barrier.
+- Runtime dispatch in `mha_fwd_splitkv_mla::run` via
+  `cudaDevAttrMaxSharedMemoryPerBlockOptin`.
+
+Remaining compile blocker (kP=1 instantiation guarded behind
+`-DFLASH_MLA_ENABLE_KP1`): with kP=1, `tile_to_shape` flattens
+`SmemLayoutK`'s 576 = 64x9 column structure such that the
+`SmemLayoutVtransposed` composition fails `shape_div` (dividing the `C<9>`
+mode for the 512-column V view); pipe-mode strides 18432, 1, and 0 all fail
+identically, so the issue is the mode flattening, not the pipe stride. Next
+attempts: build the inner (kBlockN, kHeadDim) tiling first and
+`append<3>()` the trivial pipe mode so the kP=2 mode structure is preserved,
+or slice the pipe mode out of `SmemLayoutK` before the transpose composition
+and re-append it.

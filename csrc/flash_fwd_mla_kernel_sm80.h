@@ -28,7 +28,7 @@ constexpr auto getSmemLayoutK() {
     }
 }
 
-template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, typename elem_type=cutlass::bfloat16_t, int kHeadDimV_ = 0>
+template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, typename elem_type=cutlass::bfloat16_t, int kHeadDimV_ = 0, int kPipe_ = 2>
 struct Flash_fwd_kernel_traits_mla {
     using Element = elem_type;
     using ElementAccum = float;
@@ -76,7 +76,11 @@ struct Flash_fwd_kernel_traits_mla {
         SmemLayoutQ{},
         make_layout(Shape<Int<kBlockM>, Int<kHeadDim / kNumInnerStagesK>, Int<kNumInnerStagesK>>{})));
 
-    using kP = Int<2>; // pipeline count
+    // K pipeline depth. 2 = double buffer (A100-class smem). 1 = single
+    // buffer for sm_86-class parts (101376 B opt-in smem); the kernel
+    // restructures the next-K prefetch to after the PV GEMM in that case.
+    static_assert(kPipe_ == 1 || kPipe_ == 2, "kPipe must be 1 or 2");
+    using kP = Int<kPipe_>; // pipeline count
     using SmemLayoutK = decltype(tile_to_shape(
             getSmemLayoutK<Element, kHeadDim, kHeadDimV>(),
             Shape<Int<kBlockN>, Int<kHeadDim>, kP>{}));
@@ -88,7 +92,10 @@ struct Flash_fwd_kernel_traits_mla {
             Shape<Int<kBlockN>, Int<kHeadDimV>, kP>{}));
     // Use SmemLayoutK (not SmemLayoutV) so the pipeline stride matches the actual K buffer layout.
     // SmemLayoutV has pipeline stride cosize(32,512)=16384, but K data for pipe=1 starts at cosize(32,576)=18432.
-    using SmemLayoutVtransposed = decltype(composition(SmemLayoutK{}, make_layout(Shape<Int<kHeadDimV>, Int<kBlockN>, kP>{}, Stride<Int<kBlockN>,_1, Int<kHeadDim * kBlockN>>{})));
+    // With kPipe_=1 the pipe mode has extent 1; give it stride 0 (broadcast)
+    // so the cute composition's shape_div stays inside the single buffer.
+    static constexpr int kVtPipeStride = kPipe_ == 1 ? 0 : kHeadDim * kBlockN;
+    using SmemLayoutVtransposed = decltype(composition(SmemLayoutK{}, make_layout(Shape<Int<kHeadDimV>, Int<kBlockN>, kP>{}, Stride<Int<kBlockN>,_1, Int<kVtPipeStride>>{})));
 
     static constexpr int kBlockKSmemP = kBlockN % 64 == 0 ? 64 : 32;
     static constexpr int kSwizzleP = kBlockKSmemP == 32 ? 2 : 3;
@@ -416,20 +423,29 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
     for (int masking_step = 0; masking_step < n_masking_steps; ++masking_step, --n_block) {
         Tensor acc_s = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kBlockN>>{});  // (MMA=4, MMA_M, MMA_N)
         clear(acc_s);
-        if (n_block - 1 >= n_block_min) {
-            // Advance gK
-            const int *block_table = params.block_table + bidb * params.block_table_batch_stride;
-            cur_block_table = __ldg(&block_table[n_block - 1]);
-            const index_t offset_k = cur_block_table * params.k_batch_stride;
-            tKgK.data() = tKgK.data() + offset_k;
-            Tensor tKsK_p = tKsK(_,_,_,smem_pipe_write);
-            flash::copy</*Is_even_MN=*/true, /*Is_even_K=*/true>(gmem_tiled_copy, tKgK, tKsK_p, tKVcKV, tKVpKV);
-            tKgK.data() = tKgK.data() + -offset_k;
+        if constexpr (Kernel_traits::kP::value > 1) {
+            // Double buffer: prefetch the next K block into the other pipe
+            // while this iteration computes on smem_pipe_read.
+            if (n_block - 1 >= n_block_min) {
+                // Advance gK
+                const int *block_table = params.block_table + bidb * params.block_table_batch_stride;
+                cur_block_table = __ldg(&block_table[n_block - 1]);
+                const index_t offset_k = cur_block_table * params.k_batch_stride;
+                tKgK.data() = tKgK.data() + offset_k;
+                Tensor tKsK_p = tKsK(_,_,_,smem_pipe_write);
+                flash::copy</*Is_even_MN=*/true, /*Is_even_K=*/true>(gmem_tiled_copy, tKgK, tKsK_p, tKVcKV, tKVpKV);
+                tKgK.data() = tKgK.data() + -offset_k;
+            }
+            // This cp_async_fence needs to be in the if block, otherwise the synchronization
+            // isn't right and we get race conditions.
+            cute::cp_async_fence();
+            flash::cp_async_wait<1>();
+        } else {
+            // Single buffer (sm_86 smem budget): this iteration's K was
+            // issued by the prologue or by the tail of the previous
+            // iteration; wait for it fully before reading.
+            flash::cp_async_wait<0>();
         }
-        // This cp_async_fence needs to be in the if block, otherwise the synchronization
-        // isn't right and we get race conditions.
-        cute::cp_async_fence();
-        flash::cp_async_wait<1>();
         __syncthreads();
 
         #pragma unroll
@@ -480,6 +496,23 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
         flash::gemm_8x<false, false>(acc_o, tSrP, tOrVt, tPsP_read, tOsVt_p, tiled_mma, smem_tiled_copy_PreadA, smem_tiled_copy_V,
             smem_thr_copy_PreadA, smem_thr_copy_V);
 
+        if constexpr (Kernel_traits::kP::value == 1) {
+            // Single buffer: every consumer of sK/sVt has issued its smem
+            // reads; barrier against the WAR hazard, then issue the next K
+            // block into the same buffer for the following iteration.
+            __syncthreads();
+            if (n_block - 1 >= n_block_min) {
+                const int *block_table = params.block_table + bidb * params.block_table_batch_stride;
+                cur_block_table = __ldg(&block_table[n_block - 1]);
+                const index_t offset_k = cur_block_table * params.k_batch_stride;
+                tKgK.data() = tKgK.data() + offset_k;
+                Tensor tKsK_p = tKsK(_,_,_,smem_pipe_write);
+                flash::copy</*Is_even_MN=*/true, /*Is_even_K=*/true>(gmem_tiled_copy, tKgK, tKsK_p, tKVcKV, tKVpKV);
+                tKgK.data() = tKgK.data() + -offset_k;
+            }
+            cute::cp_async_fence();
+        }
+
         // Advance the smem pipe
         smem_pipe_write = smem_pipe_read;
         ++smem_pipe_read;
@@ -496,18 +529,22 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
     for (; n_block >= n_block_min; --n_block) {
         Tensor acc_s = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kBlockN>>{});  // (MMA=4, MMA_M, MMA_N)
         clear(acc_s);
-        if (n_block - 1 >= n_block_min) {
-            // Advance gK
-            const int *block_table = params.block_table + bidb * params.block_table_batch_stride;
-            cur_block_table = __ldg(&block_table[n_block - 1]);
-            const index_t offset_k = cur_block_table * params.k_batch_stride;
-            tKgK.data() = tKgK.data() + offset_k;
-            Tensor tKsK_p = tKsK(_,_,_,smem_pipe_write);
-            flash::copy</*Is_even_MN=*/true, /*Is_even_K=*/true>(gmem_tiled_copy, tKgK, tKsK_p, tKVcKV, tKVpKV);
-            tKgK.data() = tKgK.data() + -offset_k;
+        if constexpr (Kernel_traits::kP::value > 1) {
+            if (n_block - 1 >= n_block_min) {
+                // Advance gK
+                const int *block_table = params.block_table + bidb * params.block_table_batch_stride;
+                cur_block_table = __ldg(&block_table[n_block - 1]);
+                const index_t offset_k = cur_block_table * params.k_batch_stride;
+                tKgK.data() = tKgK.data() + offset_k;
+                Tensor tKsK_p = tKsK(_,_,_,smem_pipe_write);
+                flash::copy</*Is_even_MN=*/true, /*Is_even_K=*/true>(gmem_tiled_copy, tKgK, tKsK_p, tKVcKV, tKVpKV);
+                tKgK.data() = tKgK.data() + -offset_k;
+            }
+            cute::cp_async_fence();
+            flash::cp_async_wait<1>();
+        } else {
+            flash::cp_async_wait<0>();
         }
-        cute::cp_async_fence();
-        flash::cp_async_wait<1>();
         __syncthreads();
 
         #pragma unroll
@@ -533,6 +570,21 @@ __forceinline__ __device__ void compute_attn_1rowblock_splitkv_mla(const Flash_f
         Tensor tOsVt_p = tOsVt(_,_,_,smem_pipe_read);
         flash::gemm_8x<false, false>(acc_o, tSrP, tOrVt, tPsP_read, tOsVt_p, tiled_mma, smem_tiled_copy_PreadA, smem_tiled_copy_V,
             smem_thr_copy_PreadA, smem_thr_copy_V);
+
+        if constexpr (Kernel_traits::kP::value == 1) {
+            __syncthreads();
+            if (n_block - 1 >= n_block_min) {
+                const int *block_table = params.block_table + bidb * params.block_table_batch_stride;
+                cur_block_table = __ldg(&block_table[n_block - 1]);
+                const index_t offset_k = cur_block_table * params.k_batch_stride;
+                tKgK.data() = tKgK.data() + offset_k;
+                Tensor tKsK_p = tKsK(_,_,_,smem_pipe_write);
+                flash::copy</*Is_even_MN=*/true, /*Is_even_K=*/true>(gmem_tiled_copy, tKgK, tKsK_p, tKVcKV, tKVpKV);
+                tKgK.data() = tKgK.data() + -offset_k;
+            }
+            cute::cp_async_fence();
+        }
+
         smem_pipe_write = smem_pipe_read;
         ++smem_pipe_read;
         smem_pipe_read = smem_pipe_read % K_PIPE_MAX;
@@ -706,7 +758,35 @@ struct mha_fwd_splitkv_mla<T, Headdim, false> {
         static_assert(Headdim == 576 || Headdim == 512);
         FLASH_ASSERT(params.d_v == 512);
         FLASH_ASSERT(params.k_ptr == params.v_ptr);  // Shared_KV
-        using Kernel_traits = Flash_fwd_kernel_traits_mla<Headdim, 32, 32, 8, T, 512>;
-        run_flash_splitkv_fwd_mla<Kernel_traits, flash::SharedStorageMLA<Kernel_traits>>(params, stream);
+        using Kernel_traits2 = Flash_fwd_kernel_traits_mla<Headdim, 32, 32, 8, T, 512, 2>;
+        // Double-buffered K needs ~111-113 KB of dynamic smem, which fits
+        // A100-class parts (164 KB opt-in) but not sm_86 (101376 B). Fall
+        // back to the single-buffered K pipeline when the device cannot
+        // grant the double-buffered SharedStorage.
+        int device = 0, smem_optin = 0;
+        CHECK_CUDA(cudaGetDevice(&device));
+        CHECK_CUDA(cudaDeviceGetAttribute(
+            &smem_optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
+        if ((int)sizeof(flash::SharedStorageMLA<Kernel_traits2>) <= smem_optin) {
+            run_flash_splitkv_fwd_mla<Kernel_traits2, flash::SharedStorageMLA<Kernel_traits2>>(params, stream);
+        } else {
+#ifdef FLASH_MLA_ENABLE_KP1
+            // WIP: the kPipe_=1 traits do not compile yet. With kP=1,
+            // tile_to_shape flattens SmemLayoutK's 576 = 64x9 column
+            // structure such that the SmemLayoutVtransposed composition
+            // (kernel traits, kVtPipeStride site) hits a static shape_div
+            // failure dividing the C<9> mode for the 512-column V view.
+            // The runtime loop restructure (single-buffer load-after-compute
+            // with cp_async_wait<0> and a WAR barrier) is already in place
+            // above. Next step: preserve the kP=2 inner mode structure for
+            // kP=1, e.g. tile_to_shape over Shape<kBlockN, kHeadDim> then
+            // append the trivial pipe mode with append<3>(), or slice the
+            // pipe mode out of SmemLayoutK before the transpose composition.
+            using Kernel_traits1 = Flash_fwd_kernel_traits_mla<Headdim, 32, 32, 8, T, 512, 1>;
+            run_flash_splitkv_fwd_mla<Kernel_traits1, flash::SharedStorageMLA<Kernel_traits1>>(params, stream);
+#else
+            FLASH_ASSERT(!"device shared memory too small for the double-buffered MLA kernel; the kP=1 sm_86 variant is not enabled in this build");
+#endif
+        }
     }
 };
