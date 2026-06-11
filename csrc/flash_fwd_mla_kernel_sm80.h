@@ -719,37 +719,63 @@ flash_fwd_splitkv_mla_combine_kernel(__grid_constant__ const Flash_fwd_mla_param
     }
     __syncthreads();
 
-    static_assert(kHeadDimV % kNThreads == 0);
-    constexpr int Elements = kHeadDimV / kNThreads;
     const index_t row_offset_oaccum = (split_offset * hs + hs_idx) * kHeadDimV;
-    Tensor gOaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.oaccum_ptr) + row_offset_oaccum),
-                                 Shape<Int<kHeadDimV>>{}, Stride<_1>{});
-    using GmemTiledCopyOaccum = decltype(make_tiled_copy(
-            Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{},
-            Layout<Shape<Int<kNThreads>>>{},
-            Layout<Shape<Int<Elements>>>{}));
-    GmemTiledCopyOaccum gmem_tiled_copy_Oaccum;
-    auto gmem_thr_copy_Oaccum = gmem_tiled_copy_Oaccum.get_thread_slice(tidx);
-    Tensor tOgOaccum = gmem_thr_copy_Oaccum.partition_S(gOaccum);
-    Tensor tOrOaccum = make_tensor<ElementAccum>(shape(tOgOaccum));
-    Tensor tOrO = make_tensor<ElementAccum>(shape(tOgOaccum));
-    clear(tOrO);
-
-    for (int split = 0; split < actual_num_splits; ++split) {
-        cute::copy(tOgOaccum, tOrOaccum);
-        ElementAccum lse_scale = sLseScale[split];
-        for (int i = 0; i < size(tOrO); ++i) {
-            tOrO(i) += lse_scale * tOrOaccum(i);
-        }
-        tOgOaccum.data() = tOgOaccum.data() + hs * kHeadDimV;
-    }
-
-    Tensor rO = flash::convert_type<Element>(tOrO);
     const int head_idx = (bidx - batch_idx * hs) / params.seqlen_q;
     const int row = bidx - batch_idx * hs - head_idx * params.seqlen_q;
     auto o_ptr = reinterpret_cast<Element *>(params.o_ptr) + batch_idx * params.o_batch_stride + head_idx * params.o_head_stride + row * params.o_row_stride;
-    Tensor gO = make_tensor(make_gmem_ptr(o_ptr + tidx * Elements), Shape<Int<decltype(size<0>(rO))::value>>{}, Stride<_1>{});
-    cute::copy(rO, gO);
+
+    if constexpr (kHeadDimV % kNThreads == 0) {
+        constexpr int Elements = kHeadDimV / kNThreads;
+        Tensor gOaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.oaccum_ptr) + row_offset_oaccum),
+                                     Shape<Int<kHeadDimV>>{}, Stride<_1>{});
+        using GmemTiledCopyOaccum = decltype(make_tiled_copy(
+                Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{},
+                Layout<Shape<Int<kNThreads>>>{},
+                Layout<Shape<Int<Elements>>>{}));
+        GmemTiledCopyOaccum gmem_tiled_copy_Oaccum;
+        auto gmem_thr_copy_Oaccum = gmem_tiled_copy_Oaccum.get_thread_slice(tidx);
+        Tensor tOgOaccum = gmem_thr_copy_Oaccum.partition_S(gOaccum);
+        Tensor tOrOaccum = make_tensor<ElementAccum>(shape(tOgOaccum));
+        Tensor tOrO = make_tensor<ElementAccum>(shape(tOgOaccum));
+        clear(tOrO);
+
+        for (int split = 0; split < actual_num_splits; ++split) {
+            cute::copy(tOgOaccum, tOrOaccum);
+            ElementAccum lse_scale = sLseScale[split];
+            for (int i = 0; i < size(tOrO); ++i) {
+                tOrO(i) += lse_scale * tOrOaccum(i);
+            }
+            tOgOaccum.data() = tOgOaccum.data() + hs * kHeadDimV;
+        }
+
+        Tensor rO = flash::convert_type<Element>(tOrO);
+        Tensor gO = make_tensor(make_gmem_ptr(o_ptr + tidx * Elements), Shape<Int<decltype(size<0>(rO))::value>>{}, Stride<_1>{});
+        cute::copy(rO, gO);
+    } else {
+        // kHeadDimV (e.g. 576) not divisible by the thread count: scalar
+        // strided accumulate. The combine kernel moves a few hundred floats
+        // per row, so vectorization is immaterial here.
+        constexpr int kElems = cute::ceil_div(kHeadDimV, kNThreads);
+        const ElementAccum *oaccum_base =
+            reinterpret_cast<ElementAccum *>(params.oaccum_ptr) + row_offset_oaccum;
+        ElementAccum acc[kElems];
+        #pragma unroll
+        for (int e = 0; e < kElems; ++e) acc[e] = 0.f;
+        for (int split = 0; split < actual_num_splits; ++split) {
+            const ElementAccum lse_scale = sLseScale[split];
+            const ElementAccum *src = oaccum_base + (index_t)split * hs * kHeadDimV;
+            #pragma unroll
+            for (int e = 0; e < kElems; ++e) {
+                const int idx = tidx + e * kNThreads;
+                if (idx < kHeadDimV) acc[e] += lse_scale * src[idx];
+            }
+        }
+        #pragma unroll
+        for (int e = 0; e < kElems; ++e) {
+            const int idx = tidx + e * kNThreads;
+            if (idx < kHeadDimV) o_ptr[idx] = static_cast<Element>(acc[e]);
+        }
+    }
 }
 
 } // namespace flash
@@ -779,11 +805,9 @@ void run_flash_splitkv_fwd_mla(Flash_fwd_mla_params &params, cudaStream_t stream
 
 template<typename T, int Headdim>
 struct mha_fwd_splitkv_mla<T, Headdim, false> {
-    static void run(Flash_fwd_mla_params &params, cudaStream_t stream) {
-        static_assert(Headdim == 576 || Headdim == 512);
-        FLASH_ASSERT(params.d_v == 512);
-        FLASH_ASSERT(params.k_ptr == params.v_ptr);  // Shared_KV
-        using Kernel_traits2 = Flash_fwd_kernel_traits_mla<Headdim, 32, 32, 8, T, 512, 2>;
+    template<int kHeadDimV>
+    static void run_dv(Flash_fwd_mla_params &params, cudaStream_t stream) {
+        using Kernel_traits2 = Flash_fwd_kernel_traits_mla<Headdim, 32, 32, 8, T, kHeadDimV, 2>;
         // Double-buffered K needs ~111-113 KB of dynamic smem, which fits
         // A100-class parts (164 KB opt-in) but not sm_86 (101376 B). Fall
         // back to the single-buffered K pipeline when the device cannot
@@ -796,22 +820,28 @@ struct mha_fwd_splitkv_mla<T, Headdim, false> {
             run_flash_splitkv_fwd_mla<Kernel_traits2, flash::SharedStorageMLA<Kernel_traits2>>(params, stream);
         } else {
 #ifndef FLASH_MLA_DISABLE_KP1
-            // WIP: the kPipe_=1 traits do not compile yet. With kP=1,
-            // tile_to_shape flattens SmemLayoutK's 576 = 64x9 column
-            // structure such that the SmemLayoutVtransposed composition
-            // (kernel traits, kVtPipeStride site) hits a static shape_div
-            // failure dividing the C<9> mode for the 512-column V view.
-            // The runtime loop restructure (single-buffer load-after-compute
-            // with cp_async_wait<0> and a WAR barrier) is already in place
-            // above. Next step: preserve the kP=2 inner mode structure for
-            // kP=1, e.g. tile_to_shape over Shape<kBlockN, kHeadDim> then
-            // append the trivial pipe mode with append<3>(), or slice the
-            // pipe mode out of SmemLayoutK before the transpose composition.
-            using Kernel_traits1 = Flash_fwd_kernel_traits_mla<Headdim, 32, 32, 8, T, 512, 1>;
+            // Single-buffered K pipeline (kP=1) for sm_86-class smem budgets:
+            // load-after-compute with cp_async_wait<0> and a WAR barrier; the
+            // V-transpose composition uses the clean appended pipe mode (see
+            // make_smem_layout_k / make_smem_layout_vt above).
+            using Kernel_traits1 = Flash_fwd_kernel_traits_mla<Headdim, 32, 32, 8, T, kHeadDimV, 1>;
             run_flash_splitkv_fwd_mla<Kernel_traits1, flash::SharedStorageMLA<Kernel_traits1>>(params, stream);
 #else
             FLASH_ASSERT(!"device shared memory too small for the double-buffered MLA kernel; the kP=1 sm_86 variant is not enabled in this build");
 #endif
+        }
+    }
+
+    static void run(Flash_fwd_mla_params &params, cudaStream_t stream) {
+        static_assert(Headdim == 576 || Headdim == 512);
+        FLASH_ASSERT(params.d_v == 512 || params.d_v == Headdim);
+        FLASH_ASSERT(params.k_ptr == params.v_ptr);  // Shared_KV
+        if (params.d_v == 512) {
+            run_dv<512>(params, stream);
+        } else {
+            // d_v == Headdim: V is the full shared-KV row (DSV4 returns the
+            // RoPE tail through attention for the inverse-RoPE o-projection).
+            run_dv<Headdim>(params, stream);
         }
     }
 };
