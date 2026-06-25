@@ -69,6 +69,31 @@ struct mha_fwd_splitkv_mla_ws {
 void run_mha_fwd_splitkv_mla(Flash_fwd_mla_params &params, cudaStream_t stream,
                              int head_size, bool is_bf16, bool is_sm90, bool warp_spec);
 
+// Ampere sm_86 sparse-MLA decode (DeepSeek-V4-Flash absorbed form, head_dim 512, V==K).
+struct Sparse_mla_decode_params {
+    int num_tokens, num_heads, block_size;
+    float scale_log2;                 // softmax_scale * log2(e)
+    const void *q_ptr;                // bf16 [T, H, 512]
+    int64_t q_token_stride, q_head_stride;   // in elements
+    void *o_ptr;                      // bf16 [T, H, 512]
+    int64_t out_token_stride, out_head_stride;
+    const float *attn_sink_ptr;       // [H] or nullptr
+    // swa stream
+    const void *swa_cache_ptr;        // uint8 fp8_ds_mla [nb, bs, 584]
+    int64_t swa_block_stride;         // bytes per paged block
+    const int *swa_indices_ptr;       // [T, swa_topk]
+    const int *swa_lens_ptr;          // [T]
+    int swa_topk, swa_num_blocks;
+    // optional extra (compressed) stream; *_cache_ptr nullptr when absent
+    const void *extra_cache_ptr;
+    int64_t extra_block_stride;
+    const int *extra_indices_ptr;
+    const int *extra_lens_ptr;
+    int extra_topk, extra_num_blocks, extra_block_size;
+};
+
+void run_sparse_mla_decode(Sparse_mla_decode_params &params, cudaStream_t stream);
+
 struct Mla_metadata_params {
     int *__restrict__ seqlens_k_ptr;
     int *__restrict__ tile_scheduler_metadata_ptr;

@@ -129,3 +129,52 @@ def flash_mla_with_kvcache_int8(
         num_splits,
     )
     return out, softmax_lse
+
+
+def flash_sparse_mla_decode(
+    q: torch.Tensor,
+    swa_cache: torch.Tensor,
+    swa_indices: torch.Tensor,
+    swa_lens: torch.Tensor,
+    scale: Optional[float] = None,
+    attn_sink: Optional[torch.Tensor] = None,
+    extra_cache: Optional[torch.Tensor] = None,
+    extra_indices: Optional[torch.Tensor] = None,
+    extra_lens: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Ampere (sm_86) CUDA sparse-MLA decode (DeepSeek-V4-Flash absorbed form).
+
+    Attends each (decode token, head) over the indexer-selected top-k slots only;
+    head_dim is 512, V == K, the paged caches are ``fp8_ds_mla`` (uint8: 448 fp8 NoPE
+    with UE8M0 per-64-group scales + 64 bf16 RoPE), dequantized in-kernel.
+
+    Arguments:
+        q: (num_decode_tokens, num_heads, 512) bfloat16.
+        swa_cache: (num_blocks, block_size, 584) uint8, fp8_ds_mla.
+        swa_indices: (num_decode_tokens, swa_topk) int32 -- selected slot ids (-1 = pad).
+        swa_lens: (num_decode_tokens,) int32 -- valid count per token.
+        scale: softmax scale; defaults to 1/sqrt(512).
+        attn_sink: (num_heads,) float32 or None.
+        extra_cache/extra_indices/extra_lens: optional second (compressed) cache stream.
+
+    Returns:
+        out: (num_decode_tokens, num_heads, 512) bfloat16.
+    """
+    if scale is None:
+        scale = q.shape[-1] ** (-0.5)
+    if not hasattr(torch.ops.flash_mla, "fwd_sparse_decode_mla"):
+        raise NotImplementedError(
+            "torch.ops.flash_mla.fwd_sparse_decode_mla is not built yet "
+            "(Ampere sm_86 CUDA sparse-MLA decode kernel)."
+        )
+    return torch.ops.flash_mla.fwd_sparse_decode_mla(
+        q,
+        swa_cache,
+        swa_indices,
+        swa_lens,
+        float(scale),
+        attn_sink,
+        extra_cache,
+        extra_indices,
+        extra_lens,
+    )

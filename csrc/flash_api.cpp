@@ -278,6 +278,68 @@ mha_fwd_kvcache_mla(
     return {out, softmax_lse};
 }
 
+// ------------------------------------------------------------------ sparse-MLA decode (sm_86)
+
+Tensor
+mha_fwd_sparse_decode_mla(
+    Tensor q,                                   // [T, H, 512] bf16
+    Tensor swa_cache,                           // [nb, bs, 584] uint8 fp8_ds_mla
+    Tensor swa_indices,                         // [T, swa_topk] int32
+    Tensor swa_lens,                            // [T] int32
+    double scale,
+    std::optional<Tensor> attn_sink,            // [H] float32 or None
+    std::optional<Tensor> extra_cache,
+    std::optional<Tensor> extra_indices,
+    std::optional<Tensor> extra_lens
+) {
+    int device = torch::stable::accelerator::getCurrentDeviceIndex();
+    auto props = get_dev_props(device);
+    STD_TORCH_CHECK(props.major == 8, "sparse-MLA decode kernel is Ampere (sm_8x) only");
+
+    int T = q.size(0), H = q.size(1), D = q.size(2);
+    STD_TORCH_CHECK(D == 512, "head_dim must be 512");
+    STD_TORCH_CHECK(q.scalar_type() == ScalarType::BFloat16, "q must be bfloat16");
+    CHECK_DEVICE(q); CHECK_DEVICE(swa_cache); CHECK_DEVICE(swa_indices); CHECK_DEVICE(swa_lens);
+    STD_TORCH_CHECK(swa_indices.scalar_type() == ScalarType::Int, "swa_indices must be int32");
+    STD_TORCH_CHECK(swa_lens.scalar_type() == ScalarType::Int, "swa_lens must be int32");
+
+    torch::stable::accelerator::DeviceGuard guard(device);
+    Tensor out = torch::stable::new_empty(q, {T, H, D});
+
+    Sparse_mla_decode_params p = {};
+    p.num_tokens = T;
+    p.num_heads = H;
+    p.block_size = swa_cache.size(1);
+    p.scale_log2 = static_cast<float>(scale * M_LOG2E);
+    p.q_ptr = q.data_ptr();
+    p.q_token_stride = q.stride(0);
+    p.q_head_stride = q.stride(1);
+    p.o_ptr = out.data_ptr();
+    p.out_token_stride = out.stride(0);
+    p.out_head_stride = out.stride(1);
+    p.attn_sink_ptr = attn_sink.has_value()
+        ? reinterpret_cast<const float *>(attn_sink.value().data_ptr()) : nullptr;
+    p.swa_cache_ptr = swa_cache.data_ptr();
+    p.swa_block_stride = swa_cache.stride(0);
+    p.swa_indices_ptr = reinterpret_cast<const int *>(swa_indices.data_ptr());
+    p.swa_lens_ptr = reinterpret_cast<const int *>(swa_lens.data_ptr());
+    p.swa_topk = swa_indices.size(1);
+    p.swa_num_blocks = swa_cache.size(0);
+    if (extra_cache.has_value()) {
+        p.extra_cache_ptr = extra_cache.value().data_ptr();
+        p.extra_block_stride = extra_cache.value().stride(0);
+        p.extra_indices_ptr = reinterpret_cast<const int *>(extra_indices.value().data_ptr());
+        p.extra_lens_ptr = reinterpret_cast<const int *>(extra_lens.value().data_ptr());
+        p.extra_topk = extra_indices.value().size(1);
+        p.extra_num_blocks = extra_cache.value().size(0);
+        p.extra_block_size = extra_cache.value().size(1);
+    }
+
+    cudaStream_t stream = current_cuda_stream(device);
+    run_sparse_mla_decode(p, stream);
+    return out;
+}
+
 // ------------------------------------------------------------------ boxed wrappers + registration
 
 void boxed_get_mla_metadata(StableIValue *stack, uint64_t num_args, uint64_t num_outputs) {
@@ -307,16 +369,35 @@ void boxed_fwd_kvcache_mla(StableIValue *stack, uint64_t num_args, uint64_t num_
     stack[1] = from(res[1]);
 }
 
+void boxed_fwd_sparse_decode_mla(StableIValue *stack, uint64_t num_args, uint64_t num_outputs) {
+    auto q = to<Tensor>(stack[0]);
+    auto swa_cache = to<Tensor>(stack[1]);
+    auto swa_indices = to<Tensor>(stack[2]);
+    auto swa_lens = to<Tensor>(stack[3]);
+    auto scale = to<double>(stack[4]);
+    auto attn_sink = to<std::optional<Tensor>>(stack[5]);
+    auto extra_cache = to<std::optional<Tensor>>(stack[6]);
+    auto extra_indices = to<std::optional<Tensor>>(stack[7]);
+    auto extra_lens = to<std::optional<Tensor>>(stack[8]);
+    auto res = mha_fwd_sparse_decode_mla(q, swa_cache, swa_indices, swa_lens, scale,
+                                         attn_sink, extra_cache, extra_indices, extra_lens);
+    stack[0] = from(res);
+}
+
 STABLE_TORCH_LIBRARY(flash_mla, m) {
     m.def("get_mla_metadata(Tensor seqlens_k, int num_heads_per_head_k, int num_heads_k) -> (Tensor, Tensor)");
     m.def("fwd_kvcache_mla(Tensor q, Tensor kcache, Tensor? vcache, int head_size_v, "
           "Tensor seqlens_k, Tensor block_table, float softmax_scale, bool is_causal, "
           "Tensor tile_scheduler_metadata, Tensor num_splits, bool warp_spec) -> (Tensor, Tensor)");
+    m.def("fwd_sparse_decode_mla(Tensor q, Tensor swa_cache, Tensor swa_indices, Tensor swa_lens, "
+          "float scale, Tensor? attn_sink, Tensor? extra_cache, Tensor? extra_indices, "
+          "Tensor? extra_lens) -> Tensor");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(flash_mla, CUDA, m) {
     m.impl("get_mla_metadata", &boxed_get_mla_metadata);
     m.impl("fwd_kvcache_mla", &boxed_fwd_kvcache_mla);
+    m.impl("fwd_sparse_decode_mla", &boxed_fwd_sparse_decode_mla);
 }
 
 // Dummy module so `import flash_mla_cuda` loads the .so and runs the
