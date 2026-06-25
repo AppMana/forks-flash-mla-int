@@ -111,63 +111,53 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------- manylinux_2_28 (glibc 2.28)
+  # Runs the pytorch cuda13 builder via `docker run` on the host (not as a job
+  # `container:`) so we can free ~14GB of runner disk BEFORE the ~20GB image pull
+  # -- otherwise container init dies with "no space left on device".
   manylinux-wheel:
     name: Wheel (manylinux_2_28, glibc 2.28)
     runs-on: ubuntu-24.04
     needs: release-meta
-    container:
-      image: pytorch/manylinux2_28-builder:cuda13.0
     steps:
+      - name: Free runner disk (cuda13 manylinux builder is ~20GB)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: false
+
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Select Python 3.12 + uv
+      - name: Build + repair manylinux_2_28 wheel in the pytorch cuda13 builder
         run: |
           set -euo pipefail
-          export PATH="/opt/python/cp312-cp312/bin:${PATH}"
-          echo "/opt/python/cp312-cp312/bin" >> "$GITHUB_PATH"
-          python -m pip install --upgrade pip uv
-
-      - name: Show nvcc
-        run: nvcc --version
-
-      - name: Install build deps + torch
-        run: |
-          set -euo pipefail
-          uv pip install --system packaging setuptools wheel numpy ninja
-          uv pip install --system --index-url https://download.pytorch.org/whl/${CUDA_INDEX} torch==${TORCH_VERSION}
-
-      - name: Build wheel
-        env:
-          EXT_PARALLEL: "2"
-          MAX_JOBS: "2"
-          NVCC_THREADS: "2"
-        run: |
-          set -euo pipefail
-          rm -rf build dist
-          python setup.py bdist_wheel --verbose
-          ls -la dist/*.whl
-
-      - name: Repair to manylinux_2_28 (exclude torch/cuda libs)
-        run: |
-          set -euo pipefail
-          uv pip install --system auditwheel
-          for whl in dist/*.whl; do
-            auditwheel repair "$whl" \
-              --plat manylinux_2_28_x86_64 \
-              --exclude 'libtorch*.so*' --exclude 'libc10*.so*' \
-              --exclude 'libcudart*.so*' --exclude 'libcudnn*.so*' \
-              --exclude 'libcublas*.so*' --exclude 'libnvToolsExt*.so*' \
-              -w dist_repaired/ || { echo "auditwheel repair failed for $whl"; exit 1; }
-          done
-          rm -rf dist && mv dist_repaired dist
-          ls -la dist/*.whl
+          docker run --rm -v "$PWD":/io -w /io pytorch/manylinux2_28-builder:cuda13.0 bash -c '
+            set -euo pipefail
+            export PATH=/opt/python/cp312-cp312/bin:$PATH
+            python -m pip install -q -U pip uv
+            uv pip install --system -q packaging setuptools wheel numpy ninja
+            uv pip install --system -q --index-url https://download.pytorch.org/whl/'"${CUDA_INDEX}"' torch=='"${TORCH_VERSION}"'
+            rm -rf build dist dist_manylinux
+            FLASH_MLA_DISABLE_FP16=TRUE MAX_JOBS=2 NVCC_THREADS=2 python setup.py bdist_wheel
+            uv pip install --system -q auditwheel
+            auditwheel repair dist/*.whl --plat manylinux_2_28_x86_64 \
+              --exclude "libtorch*.so*" --exclude "libc10*.so*" --exclude "libcudart*.so*" \
+              --exclude "libcudnn*.so*" --exclude "libcublas*.so*" --exclude "libnvToolsExt*.so*" \
+              -w /io/dist_manylinux/
+          '
+          sudo chown -R "$(id -u):$(id -g)" dist_manylinux 2>/dev/null || true
+          ls -la dist_manylinux/*.whl
 
       - name: Verify cp39-abi3 + manylinux tag
         run: |
           set -euo pipefail
-          for whl in dist/*.whl; do
+          for whl in dist_manylinux/*.whl; do
             case "$whl" in
               *cp39-abi3*manylinux_2_28*) echo "ok: $whl" ;;
               *) echo "Unexpected wheel tag (want cp39-abi3 + manylinux_2_28): $whl"; exit 1 ;;
@@ -177,7 +167,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: flash_mla-manylinux_2_28-${{ env.CUDA_INDEX }}
-          path: dist/*.whl
+          path: dist_manylinux/*.whl
           if-no-files-found: error
 
   # ---------------------------------------------------------------- publish
