@@ -11,7 +11,7 @@ name: Build wheels (stable ABI, cp39-abi3)
 
 on:
   push:
-    branches: [build-wheels, appmana/vllm-ampere, main]
+    branches: [build-wheels, appmana/sm86-smem-analysis, appmana/vllm-ampere, main]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -203,3 +203,75 @@ jobs:
           make_latest: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------- gh-pages simple index
+  publish-simple-index:
+    name: Publish gh-pages PEP 503 simple index
+    runs-on: ubuntu-24.04
+    needs: [release-meta, jammy-wheel, manylinux-wheel, publish-release]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Prepare gh-pages branch
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          REPO_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git ls-remote --exit-code --heads "$REPO_URL" gh-pages >/dev/null 2>&1; then
+            git clone --depth 1 --branch gh-pages "$REPO_URL" gh-pages
+          else
+            mkdir -p gh-pages && pushd gh-pages >/dev/null
+            git init -q && git checkout -q -b gh-pages && git remote add origin "$REPO_URL"
+            popd >/dev/null
+          fi
+
+      - name: Regenerate simple index (append this release's wheels)
+        shell: bash
+        env:
+          TAG_NAME: ${{ needs.release-meta.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          pkg_dir="gh-pages/flash-mla"          # PEP 503 normalizes flash_mla -> flash-mla
+          mkdir -p "$pkg_dir"
+          manifest="${pkg_dir}/links.tsv"; touch "$manifest"
+          base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG_NAME}"
+          urlquote () { python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "$1"; }
+
+          shopt -s nullglob
+          n=0
+          for whl in release-artifacts/*.whl; do
+            base="$(basename "$whl")"; hash="$(sha256sum "$whl" | awk '{print $1}')"
+            url="${base_url}/$(urlquote "$base")"
+            tmp="$(mktemp)"; awk -F '\t' -v n="$base" '$1!=n' "$manifest" > "$tmp"
+            printf '%s\t%s\t%s\n' "$base" "$hash" "$url" >> "$tmp"; mv "$tmp" "$manifest"
+            n=$((n+1))
+          done
+          [ "$n" -gt 0 ] || { echo "no wheels to index"; exit 1; }
+
+          # package index page
+          { echo '<!doctype html><html><body>'
+            sort "$manifest" | while IFS=$'\t' read -r name hash url; do
+              [ -n "$name" ] && printf '<a href="%s#sha256=%s">%s</a><br/>\n' "$url" "$hash" "$name"
+            done
+            echo '</body></html>'; } > "${pkg_dir}/index.html"
+          # root index page
+          { echo '<!doctype html><html><body><a href="flash-mla/">flash-mla</a></body></html>'; } > gh-pages/index.html
+          touch gh-pages/.nojekyll
+
+      - name: Commit and push gh-pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          pushd gh-pages >/dev/null
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          git diff --cached --quiet && { echo "no index changes"; exit 0; }
+          git commit -q -m "simple index: ${GITHUB_SHA}"
+          git push -q origin gh-pages
+          popd >/dev/null
