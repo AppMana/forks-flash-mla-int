@@ -22,8 +22,6 @@
 #include <optional>
 #include <vector>
 
-#include <cutlass/fast_math.h>
-
 #include "flash_mla.h"
 #include "static_switch.h"
 
@@ -33,6 +31,10 @@ using torch::headeronly::ScalarType;
 // ------------------------------------------------------------------ helpers
 
 namespace {
+
+// host-side ceil-div; avoids pulling cutlass/fast_math.h (-> libcudacxx
+// <cuda/std/utility>) into this host-compiled (.cpp, not nvcc) translation unit.
+inline int ceil_div(int a, int b) { return (a + b - 1) / b; }
 
 struct DevProps { int major; int minor; int sm_count; };
 
@@ -88,7 +90,7 @@ get_mla_metadata(
     int *seqlens_k_ptr = reinterpret_cast<int *>(seqlens_k.data_ptr());
 
     int num_sm_parts = props.sm_count / static_cast<int>(num_heads_k)
-                       / cutlass::ceil_div(static_cast<int>(num_heads_per_head_k), block_size_m);
+                       / ceil_div(static_cast<int>(num_heads_per_head_k), block_size_m);
 
     Tensor tile_scheduler_metadata = torch::stable::new_empty(seqlens_k, {num_sm_parts, TileSchedulerMetaDataSize});
     Tensor num_splits = torch::stable::new_empty(seqlens_k, {batch_size + 1});
@@ -245,36 +247,21 @@ mha_fwd_kvcache_mla(
 
     STD_TORCH_CHECK(head_size == 576 || head_size == 512);
 
-    if (q.scalar_type() == ScalarType::BFloat16) {
-        if (is_sm90) {
-            STD_TORCH_CHECK(head_size == 576, "sm90 path currently supports head_size=576 only");
-            mha_fwd_splitkv_mla<cutlass::bfloat16_t, 576, true>::run(params, stream);
-        } else if (warp_spec) {
-            if (head_size == 512) {
-                mha_fwd_splitkv_mla<cutlass::bfloat16_t, 512, false>::run(params, stream);
-            } else {
-                mha_fwd_splitkv_mla_ws<cutlass::bfloat16_t, 576>::run(params, stream);
-            }
-        } else {
-            if (head_size == 512) {
-                mha_fwd_splitkv_mla<cutlass::bfloat16_t, 512, false>::run(params, stream);
-            } else {
-                mha_fwd_splitkv_mla<cutlass::bfloat16_t, 576, false>::run(params, stream);
-            }
-        }
+    bool is_bf16 = q.scalar_type() == ScalarType::BFloat16;
+    bool is_half = q.scalar_type() == ScalarType::Half;
+    STD_TORCH_CHECK(is_bf16 || is_half, "Unsupported tensor dtype for query");
+    if (is_bf16 && is_sm90) {
+        STD_TORCH_CHECK(head_size == 576, "sm90 path currently supports head_size=576 only");
     }
-    #ifndef FLASH_MLA_DISABLE_FP16
-    else if (q.scalar_type() == ScalarType::Half) {
-        if (is_sm90) {
-            mha_fwd_splitkv_mla<cutlass::half_t, 576, true>::run(params, stream);
-        } else {
-            STD_TORCH_CHECK(false, "sm80 only support bfloat16");
-        }
+    if (is_half) {
+        STD_TORCH_CHECK(is_sm90, "sm80 only support bfloat16");
+#ifdef FLASH_MLA_DISABLE_FP16
+        STD_TORCH_CHECK(false, "fp16 support disabled in this build");
+#endif
     }
-    #endif
-    else {
-        STD_TORCH_CHECK(false, "Unsupported tensor dtype for query");
-    }
+    // Typed kernel dispatch lives in flash_api_dispatch.cu (nvcc) so this host TU
+    // stays cutlass-free.
+    run_mha_fwd_splitkv_mla(params, stream, head_size, is_bf16, is_sm90, warp_spec);
 
     // (b, sq_ori, ng, hk, dv) -> transpose(2,3) -> reshape(b, sq_ori, h_ori, dv)
     out = torch::stable::reshape(

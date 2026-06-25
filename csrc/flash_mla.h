@@ -34,6 +34,12 @@ struct Flash_fwd_mla_params {
     index_t block_table_batch_stride;
     int page_block_size;
 
+    // Fused int8 path (task #61): per-kv-token rowwise-symmetric scales for the int8
+    // K/V cache. Q is quantized in-kernel (no param). nullptr on the bf16 path.
+    float *__restrict__ k_scale_ptr;   // [num_blocks * page_block_size] (per kv token, K dequant)
+    float *__restrict__ v_scale_ptr;   // [num_blocks * page_block_size] (per kv token, V dequant)
+    index_t kv_scale_batch_stride;     // stride between paged blocks, in elements
+
     int *__restrict__ tile_scheduler_metadata_ptr;
     int num_sm_parts;
     int *__restrict__ num_splits_ptr;
@@ -56,6 +62,12 @@ template<typename T, int Headdim>
 struct mha_fwd_splitkv_mla_ws {
     static void run(Flash_fwd_mla_params &params, cudaStream_t stream);
 };
+
+// Plain (cutlass-type-free) dispatch entry so the host-compiled binding
+// (flash_api.cpp, c++ not nvcc) never needs cutlass element types. Defined in
+// flash_api_dispatch.cu (nvcc).
+void run_mha_fwd_splitkv_mla(Flash_fwd_mla_params &params, cudaStream_t stream,
+                             int head_size, bool is_bf16, bool is_sm90, bool warp_spec);
 
 struct Mla_metadata_params {
     int *__restrict__ seqlens_k_ptr;
