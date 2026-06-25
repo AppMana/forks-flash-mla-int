@@ -269,12 +269,20 @@ else:
         cxx_args = ["-O3", "-std=c++17", "-DNDEBUG", "-Wno-deprecated-declarations"]
 
 ext_modules = []
+# Torch + Python stable ABI (abi3 / cp39). The binding (csrc/flash_api.cpp) uses
+# only torch::stable + the AOTI shim (no ATen/c10/pybind), so the resulting wheel
+# is cp39-abi3 and works on any torch >= 2.9 (the stable-ABI floor). Disable with
+# FLASH_MLA_DISABLE_STABLE_ABI=TRUE to fall back to a version-specific pybind build.
+STABLE_ABI = os.getenv("FLASH_MLA_DISABLE_STABLE_ABI", "FALSE") != "TRUE"
+# -DUSE_CUDA exposes the CUDA-specific AOTI shim decls (aoti_torch_get_current_cuda_stream),
+# which sit behind #ifdef USE_CUDA in shim.h; the symbol is present in the CUDA-built libtorch.
+stable_abi_flags = ["-DPy_LIMITED_API=0x03090000", "-DTORCH_STABLE_ONLY", "-DUSE_CUDA"] if STABLE_ABI else []
 ext_modules.append(
     CUDAExtension(
         name="flash_mla_cuda",
         sources=get_sources(),
         extra_compile_args={
-            "cxx": cxx_args + get_features_args(),
+            "cxx": cxx_args + get_features_args() + stable_abi_flags,
             "nvcc": append_nvcc_threads(
                 [
                     "-O0" if DEBUG_BUILD else "-O3",
@@ -292,12 +300,13 @@ ext_modules.append(
                 + (["-g", "-G", "-lineinfo"] if DEBUG_BUILD else [])
                 + ["--ptxas-options=-v,--register-usage-level=10"]
                 + cc_flag
-            ) + get_features_args(),
+            ) + get_features_args() + stable_abi_flags,
         },
         include_dirs=[
             Path(this_dir) / "csrc",
             Path(this_dir) / "csrc" / "cutlass" / "include",
         ] + get_cuda_include_dirs(),
+        py_limited_api=STABLE_ABI,
     )
 )
 
@@ -317,4 +326,6 @@ setup(
     packages=find_packages(include=['flash_mla']),
     ext_modules=ext_modules,
     cmdclass={"build_ext": BuildExtension},
+    python_requires=">=3.9",
+    options=({"bdist_wheel": {"py_limited_api": "cp39"}} if STABLE_ABI else {}),
 )

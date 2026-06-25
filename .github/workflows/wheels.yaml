@@ -1,0 +1,205 @@
+name: Build wheels (stable ABI, cp39-abi3)
+
+# Builds two Linux wheels for flash_mla, both cp39-abi3 + torch-stable (TORCH_STABLE_ONLY),
+# so a single wheel works on any torch >= 2.9 with CUDA 13.x:
+#   1. jammy        -> built on Ubuntu 22.04 (glibc 2.35). Exact match for the current
+#                      DSV4 serving image (vllm-ampere, jammy/glibc 2.35).
+#   2. manylinux    -> built in manylinux_2_28 (glibc 2.28). Portable: runs on jammy,
+#                      noble, and anything with glibc >= 2.28.
+# CUDA is pinned to 13.0 to match the serving image (torch 2.11.0+cu130). The kernels
+# build for sm_80 + sm_90a (setup.py); sm_80 SASS covers the RTX 3090 / A5000 (sm_86).
+
+on:
+  push:
+    branches: [build-wheels, appmana/vllm-ampere, main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  TORCH_VERSION: "2.11.0"
+  CUDA_INDEX: "cu130"
+
+jobs:
+  release-meta:
+    name: Compute release metadata
+    runs-on: ubuntu-24.04
+    outputs:
+      tag_name: ${{ steps.meta.outputs.tag_name }}
+      release_name: ${{ steps.meta.outputs.release_name }}
+    steps:
+      - name: Compute tag and release name
+        id: meta
+        shell: bash
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          timestamp="$(date -u +%Y%m%d-%H%M%S)"
+          echo "tag_name=nightly-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "release_name=Nightly ${timestamp} (${short_sha})" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------- jammy (glibc 2.35)
+  jammy-wheel:
+    name: Wheel (jammy, glibc 2.35)
+    runs-on: ubuntu-22.04
+    needs: release-meta
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: python -m pip install --upgrade pip uv
+
+      - name: Install CUDA toolkit 13.0
+        uses: Jimver/cuda-toolkit@v0.2.29
+        with:
+          cuda: "13.0.2"
+          method: network
+          log-file-suffix: jammy
+
+      - name: Show nvcc
+        run: nvcc --version
+
+      - name: Install build deps + torch
+        run: |
+          set -euo pipefail
+          uv pip install --system packaging setuptools wheel numpy ninja
+          uv pip install --system --index-url https://download.pytorch.org/whl/${CUDA_INDEX} torch==${TORCH_VERSION}
+
+      - name: Build wheel
+        env:
+          EXT_PARALLEL: "2"
+          MAX_JOBS: "2"
+          NVCC_THREADS: "2"
+        run: |
+          set -euo pipefail
+          rm -rf build dist
+          python setup.py bdist_wheel --verbose
+          # tag as manylinux_2_35 (glibc 2.35) so pip resolves it correctly
+          python -m pip install --quiet auditwheel || true
+          ls -la dist/*.whl
+
+      - name: Verify cp39-abi3 tag
+        run: |
+          set -euo pipefail
+          for whl in dist/*.whl; do
+            case "$whl" in
+              *cp39-abi3*) echo "ok: $whl" ;;
+              *) echo "Unexpected wheel tag (want cp39-abi3): $whl"; exit 1 ;;
+            esac
+          done
+
+      - name: Smoke import (registers torch.ops.flash_mla.*)
+        run: |
+          set -euo pipefail
+          uv pip install --system --index-url https://download.pytorch.org/whl/${CUDA_INDEX} torch==${TORCH_VERSION}
+          uv pip install --system --no-deps dist/*.whl
+          cd /tmp
+          python -c "import torch, flash_mla_cuda; print('flash_mla ops:', [n for n in dir(torch.ops.flash_mla)])"
+          python -c "from flash_mla import flash_mla_with_kvcache, flash_mla_with_kvcache_int8; print('interface OK')"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flash_mla-jammy-${{ env.CUDA_INDEX }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- manylinux_2_28 (glibc 2.28)
+  manylinux-wheel:
+    name: Wheel (manylinux_2_28, glibc 2.28)
+    runs-on: ubuntu-24.04
+    needs: release-meta
+    container:
+      image: pytorch/manylinux2_28-builder:cuda13.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Select Python 3.12 + uv
+        run: |
+          set -euo pipefail
+          export PATH="/opt/python/cp312-cp312/bin:${PATH}"
+          echo "/opt/python/cp312-cp312/bin" >> "$GITHUB_PATH"
+          python -m pip install --upgrade pip uv
+
+      - name: Show nvcc
+        run: nvcc --version
+
+      - name: Install build deps + torch
+        run: |
+          set -euo pipefail
+          uv pip install --system packaging setuptools wheel numpy ninja
+          uv pip install --system --index-url https://download.pytorch.org/whl/${CUDA_INDEX} torch==${TORCH_VERSION}
+
+      - name: Build wheel
+        env:
+          EXT_PARALLEL: "2"
+          MAX_JOBS: "2"
+          NVCC_THREADS: "2"
+        run: |
+          set -euo pipefail
+          rm -rf build dist
+          python setup.py bdist_wheel --verbose
+          ls -la dist/*.whl
+
+      - name: Repair to manylinux_2_28 (exclude torch/cuda libs)
+        run: |
+          set -euo pipefail
+          uv pip install --system auditwheel
+          for whl in dist/*.whl; do
+            auditwheel repair "$whl" \
+              --plat manylinux_2_28_x86_64 \
+              --exclude 'libtorch*.so*' --exclude 'libc10*.so*' \
+              --exclude 'libcudart*.so*' --exclude 'libcudnn*.so*' \
+              --exclude 'libcublas*.so*' --exclude 'libnvToolsExt*.so*' \
+              -w dist_repaired/ || { echo "auditwheel repair failed for $whl"; exit 1; }
+          done
+          rm -rf dist && mv dist_repaired dist
+          ls -la dist/*.whl
+
+      - name: Verify cp39-abi3 + manylinux tag
+        run: |
+          set -euo pipefail
+          for whl in dist/*.whl; do
+            case "$whl" in
+              *cp39-abi3*manylinux_2_28*) echo "ok: $whl" ;;
+              *) echo "Unexpected wheel tag (want cp39-abi3 + manylinux_2_28): $whl"; exit 1 ;;
+            esac
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flash_mla-manylinux_2_28-${{ env.CUDA_INDEX }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- publish
+  publish-release:
+    name: Publish prerelease
+    runs-on: ubuntu-24.04
+    needs: [release-meta, jammy-wheel, manylinux-wheel]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+      - name: List wheels
+        run: ls -la release-artifacts/
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release-meta.outputs.tag_name }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ needs.release-meta.outputs.release_name }}
+          prerelease: true
+          files: release-artifacts/*.whl
+          fail_on_unmatched_files: true
+          make_latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
