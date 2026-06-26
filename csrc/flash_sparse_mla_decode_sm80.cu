@@ -226,6 +226,24 @@ sparse_mla_decode_split_kernel(__grid_constant__ const Sparse_mla_decode_params 
         }
     }
 
+    // num_splits == 1 (prefill / large-T regime): this CTA holds the whole selection for
+    // (t, h) -> normalize + apply attn_sink + write the output directly, in-register. No
+    // oaccum global round-trip, no atomic, no combine (and the binding skips those allocs).
+    if (p.num_splits == 1) {
+        if (active) {
+            float gm = (p.attn_sink_ptr != nullptr) ? p.attn_sink_ptr[h] * LOG2E : -INFINITY;
+            gm = fmaxf(gm, m);
+            float gl = l * exp2f(m - gm)
+                     + ((p.attn_sink_ptr != nullptr) ? exp2f(p.attn_sink_ptr[h] * LOG2E - gm) : 0.f);
+            float sc = exp2f(m - gm) / fmaxf(gl, 1e-20f);
+            __nv_bfloat16 *out_ptr = reinterpret_cast<__nv_bfloat16 *>(p.o_ptr)
+                + (int64_t)t * p.out_token_stride + (int64_t)h * p.out_head_stride;
+#pragma unroll
+            for (int i = 0; i < VEC; ++i) out_ptr[lane + i * 32] = __float2bfloat16(acc[i] * sc);
+        }
+        return;
+    }
+
     if (active) {
         // partial out: oaccum[t][h][sp][:] = un-normalized acc ; mlse[t][h][sp] = {m, l}
         int64_t po = (((int64_t)t * p.num_heads + h) * p.num_splits + sp) * HEAD_DIM;
@@ -259,8 +277,9 @@ sparse_mla_decode_split_kernel(__grid_constant__ const Sparse_mla_decode_params 
 
 void run_sparse_mla_decode(Sparse_mla_decode_params &params, cudaStream_t stream) {
     int head_blocks = (params.num_heads + BLOCK_H - 1) / BLOCK_H;
-    cudaMemsetAsync(params.combine_counter_ptr, 0,
-                    (size_t)params.num_tokens * head_blocks * sizeof(int), stream);
+    if (params.num_splits > 1)  // num_splits==1 fast path writes output directly, no counter/combine
+        cudaMemsetAsync(params.combine_counter_ptr, 0,
+                        (size_t)params.num_tokens * head_blocks * sizeof(int), stream);
     dim3 grid(params.num_tokens, head_blocks, params.num_splits);
     sparse_mla_decode_split_kernel<<<grid, NTHREADS, 0, stream>>>(params);
 }

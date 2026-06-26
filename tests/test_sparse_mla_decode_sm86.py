@@ -159,3 +159,37 @@ def test_sparse_mla_decode_two_stream(H, s_q):
     )
     cd = cos_diff(out.float(), O_ref)
     assert cd < 8e-5, f"two-stream sparse-MLA cos_diff={cd:.2e} (H={H} s_q={s_q})"
+
+
+@pytest.mark.parametrize("H", [64])
+@pytest.mark.parametrize("T", [256, 1024])
+def test_sparse_mla_prefill_parity(H, T):
+    """Prefill: many query tokens, each with its own selection. Exercises the num_splits==1
+    fast path (direct in-kernel normalize + sink, no split-KV partials/combine)."""
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
+        pytest.skip("requires Ampere (capability 8.x)")
+    from flash_mla import flash_sparse_mla_prefill
+
+    torch.manual_seed(3)
+    dev = "cuda"
+    topk = 512
+    block_size = 32
+    scale = 1.0 / math.sqrt(_HEAD_DIM)
+    num_slots = topk + 128
+    swa_cache, K_by_slot = _build_cache(num_slots, block_size, dev)
+
+    q = torch.randn(T, H, _HEAD_DIM, device=dev, dtype=torch.bfloat16)
+    # variable per-query lens (incl. some short rows) -> exercises masking at large T
+    lens = torch.randint(topk - 64, topk + 1, (T,), dtype=torch.int32, device=dev)
+    lens[0] = 1
+    lens[1] = topk
+    indices = torch.stack([torch.randperm(num_slots, device=dev)[:topk].to(torch.int32) for _ in range(T)])
+    attn_sink = torch.randn(H, device=dev, dtype=torch.float32) * 0.1
+
+    O_ref = _fp32_ref(q, K_by_slot, indices, lens, scale, attn_sink)
+    out = flash_sparse_mla_prefill(
+        q=q, swa_cache=swa_cache, swa_indices=indices, swa_lens=lens,
+        scale=scale, attn_sink=attn_sink,
+    )
+    cd = cos_diff(out.float(), O_ref)
+    assert cd < 8e-5, f"sparse-MLA prefill cos_diff={cd:.2e} (H={H} T={T})"

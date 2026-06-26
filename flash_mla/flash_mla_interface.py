@@ -178,3 +178,39 @@ def flash_sparse_mla_decode(
         extra_indices,
         extra_lens,
     )
+
+
+def flash_sparse_mla_prefill(
+    q: torch.Tensor,
+    swa_cache: torch.Tensor,
+    swa_indices: torch.Tensor,
+    swa_lens: torch.Tensor,
+    scale: Optional[float] = None,
+    attn_sink: Optional[torch.Tensor] = None,
+    extra_cache: Optional[torch.Tensor] = None,
+    extra_indices: Optional[torch.Tensor] = None,
+    extra_lens: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Ampere (sm_86) CUDA sparse-MLA prefill (DeepSeek-V4-Flash absorbed form).
+
+    Sparse-MLA prefill is the same absorbed attention as decode (V == K, head_dim 512,
+    attn_sink merged once; causality is already encoded in the per-query selected indices),
+    differing only in that ``q`` carries many query tokens. The kernel dispatches on the
+    token count: at large T ``num_splits`` collapses to 1 and each (token, head-block) CTA
+    writes its output directly (no split-KV partials / combine). One op, one code path.
+
+    Arguments mirror :func:`flash_sparse_mla_decode`, with ``q`` shaped
+    ``(num_query_tokens, num_heads, 512)`` and ``swa_indices``/``swa_lens`` carrying the
+    per-query-token selection. Returns ``(num_query_tokens, num_heads, 512)`` bfloat16.
+    """
+    return flash_sparse_mla_decode(
+        q=q,
+        swa_cache=swa_cache,
+        swa_indices=swa_indices,
+        swa_lens=swa_lens,
+        scale=scale,
+        attn_sink=attn_sink,
+        extra_cache=extra_cache,
+        extra_indices=extra_indices,
+        extra_lens=extra_lens,
+    )

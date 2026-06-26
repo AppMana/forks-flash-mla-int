@@ -351,9 +351,12 @@ mha_fwd_sparse_decode_mla(
     if (num_splits > 64) num_splits = 64;
     p.num_splits = num_splits;
 
-    Tensor oaccum = torch::stable::new_empty(q, {T, H, num_splits, D});  // bf16 (== q), halves combine traffic
-    Tensor mlse = torch::stable::new_empty(q, {T, H, num_splits, 2}, ScalarType::Float);
-    Tensor counter = torch::stable::new_empty(q, {T * head_blocks}, ScalarType::Int);  // zeroed in-kernel launcher
+    // num_splits==1 (prefill / large-T) writes output directly in-kernel: skip the split-KV
+    // partial buffers entirely (oaccum alone is T*H*512 bf16 -> 134 MB at T=2048).
+    bool split = num_splits > 1;
+    Tensor oaccum = torch::stable::new_empty(q, {split ? T : 1, H, num_splits, D});  // bf16, un-normalized partials
+    Tensor mlse = torch::stable::new_empty(q, {split ? T : 1, H, num_splits, 2}, ScalarType::Float);
+    Tensor counter = torch::stable::new_empty(q, {split ? T * head_blocks : 1}, ScalarType::Int);
     p.oaccum_ptr = oaccum.data_ptr();
     p.mlse_ptr = reinterpret_cast<float *>(mlse.data_ptr());
     p.combine_counter_ptr = reinterpret_cast<int *>(counter.data_ptr());
