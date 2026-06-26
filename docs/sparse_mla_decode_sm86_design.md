@@ -74,8 +74,25 @@ Per CTA:
   sized to ~2*SM_count, capped to >= ~64 slots/split. This is the same correct K-share inner
   loop, re-parallelized — filling the SMs at T=1 is what mattered (NOT tensor cores).
 - **P3 int8 KV:** NOT a memory win here — the cache is already fp8 (8-bit). Skip.
-- **P4 integrate:** env-gated dispatch in `nvidia_sm86`; the gather-then-dense shim. Deferred
-  until the kernel actually beats Triton (split-KV).
+- **P2 squeeze (post-split-KV tuning) — FINAL 59.8 us @ topk=512, 87.9 us @ topk=1024 (3.6x vs Triton):**
+  - vectorized fp8 gather (`cvt_fp8x2` software path on sm_86 + direct bf16 RoPE copy): 121->69 us.
+  - `BLOCK_N` 32->16 (16KB K_s -> ~100% occupancy): minor (68 us; helps more at large topk).
+  - `BLOCK_H` 8->16 heads/CTA: 68->60 us. KEY: fewer head-blocks => less REDUNDANT fp8 decode
+    (each slot was decoded once per head-block; 8 blocks=8x, 4 blocks=4x). fp8 decode is real ALU
+    on Ampere (software cvt). BLOCK_H=32 REGRESSED (106 us — 2 blocks + 1024 thr -> 1 CTA/SM, too
+    few CTAs). Sweet spot = 16.
+  - `num_splits` cap = ~32 slots/split (16 splits @ topk=512, ~1 wave). Finer (16 slots/split)
+    REGRESSED (66 us — combine/oaccum global traffic outweighs extra parallelism).
+  - Full journey: P1 2917 -> K-share 850 -> split-KV 121 -> vec-gather 69 -> BLOCK_N16 68 ->
+    BLOCK_H16 **59.8 us**. Parameter space mapped; this is the tuned sweet spot.
+  - Remaining ideas (diminishing returns): cp.async gather prefetch (but NOT latency-bound per the
+    occupancy test), fuse split+combine into one launch (cooperative-groups grid.sync, kills the
+    2nd-launch + oaccum round-trip), bf16 oaccum. Tensor cores become worth it only at batched/MTP
+    decode where M grows (the flash-2 mma kernel is preserved in git history for that).
+- **FEATURES validated (4/4 tests):** swa-only, two-stream swa+extra (distinct block sizes),
+  attn_sink, MTP/multi-token (s_q=2), variable per-token lens, fp8_ds_mla decode on sm_86.
+- **P4 integrate:** env-gated dispatch in `nvidia_sm86._forward_decode` (the gather-then-call shim)
+  + cluster 3090 validation — the remaining step to land the 3.6x in serving.
 
 ## API
 `csrc/flash_sparse_mla_decode_sm80.{h,cu}`; binding `flash_mla_cuda.fwd_sparse_decode_mla` (stable
