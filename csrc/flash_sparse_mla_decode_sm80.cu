@@ -273,9 +273,276 @@ sparse_mla_decode_split_kernel(__grid_constant__ const Sparse_mla_decode_params 
     }
 }
 
+// ===================================================================================
+// PREFILL tensor-core path (num_splits==1). Batched mma.sync.m16n8k16 QK+PV over BLOCK_M=16
+// heads/CTA; register-resident O accumulator, two-stream, attn_sink + variable lens, direct
+// output write. At T=1 decode this starves the SMs (only head_blocks CTAs); at large-T prefill
+// the T*head_blocks CTAs fill the SMs, so the parallel MMA beats the FMA path's serial per-slot
+// warp-reductions. Recovered from the flash-2 mma decode experiment (correct fragment layouts).
+namespace mma_pf {
+
+constexpr int BLOCK_M = 16;
+constexpr int BLOCK_N = 64;
+constexpr int NWARPS = 4;
+constexpr int NTHREADS = NWARPS * 32;            // 128
+constexpr int D_PER_WARP = HEAD_DIM / NWARPS;    // 128 -> 16 d8 tiles (PV acc)
+constexpr int KS_LD = HEAD_DIM + 8;              // pad to dodge bank conflicts
+constexpr int KT = HEAD_DIM / 16;                // 32 k-tiles (QK contraction)
+constexpr int NT = BLOCK_N / 16;                 // 4 n16-tiles (PV contraction)
+
+__device__ __forceinline__ uint32_t pack2(__nv_bfloat16 a, __nv_bfloat16 b) {
+    return (uint32_t)(*reinterpret_cast<uint16_t *>(&a)) |
+           ((uint32_t)(*reinterpret_cast<uint16_t *>(&b)) << 16);
+}
+__device__ __forceinline__ uint32_t pack_contig(const __nv_bfloat16 *p) {
+    return *reinterpret_cast<const uint32_t *>(p);
+}
+__device__ __forceinline__ void mma16816(float c[4], const uint32_t a[4], const uint32_t b[2]) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+        : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
+}
+
+struct StreamArgs {
+    const uint8_t *cache;
+    int64_t block_stride;
+    int block_size, num_blocks, topk;
+    const int *indices, *lens;
+};
+struct Smem {
+    __nv_bfloat16 q_s[BLOCK_M][HEAD_DIM];   // 16 KB
+    __nv_bfloat16 k_s[BLOCK_N][KS_LD];      // 64*520*2 = 65 KB
+    float row_max[BLOCK_M];
+    float row_scratch[NWARPS][BLOCK_M];
+    __nv_bfloat16 p_s[BLOCK_M][BLOCK_N];    // softmax probs for PV
+};
+
+// m16n8 C-fragment: thread holds rows {lane/4, lane/4+8}, cols (lane%4)*2 + {0,1}.
+__global__ void __launch_bounds__(NTHREADS)
+sparse_mla_prefill_mma_kernel(__grid_constant__ const Sparse_mla_decode_params p) {
+    extern __shared__ char smem_raw[];
+    Smem &s = *reinterpret_cast<Smem *>(smem_raw);
+    const int t = blockIdx.x;
+    const int hb = blockIdx.y * BLOCK_M;
+    const int tid = threadIdx.x;
+    const int warp = tid >> 5;
+    const int lane = tid & 31;
+    const int qr0 = lane >> 2;          // C-fragment row group (0..7)
+    const int qc = (lane & 3) * 2;      // C-fragment col base (0,2,4,6)
+
+    for (int e = tid; e < BLOCK_M * HEAD_DIM; e += NTHREADS) {
+        int r = e / HEAD_DIM, c = e - r * HEAD_DIM, h = hb + r;
+        __nv_bfloat16 v = __float2bfloat16(0.f);
+        if (h < p.num_heads) {
+            const __nv_bfloat16 *qp = reinterpret_cast<const __nv_bfloat16 *>(p.q_ptr)
+                + (int64_t)t * p.q_token_stride + (int64_t)h * p.q_head_stride;
+            v = qp[c];
+        }
+        s.q_s[r][c] = v;
+    }
+
+    float acc[D_PER_WARP / 8][4];
+#pragma unroll
+    for (int d = 0; d < D_PER_WARP / 8; ++d)
+#pragma unroll
+        for (int j = 0; j < 4; ++j) acc[d][j] = 0.f;
+
+    float m0, m1, l0, l1;
+    {
+        int h0 = hb + qr0, h1 = hb + qr0 + 8;
+        bool sink = p.attn_sink_ptr != nullptr;
+        m0 = (sink && h0 < p.num_heads) ? p.attn_sink_ptr[h0] * LOG2E : -INFINITY;
+        m1 = (sink && h1 < p.num_heads) ? p.attn_sink_ptr[h1] * LOG2E : -INFINITY;
+        l0 = (sink && h0 < p.num_heads) ? 1.f : 0.f;
+        l1 = (sink && h1 < p.num_heads) ? 1.f : 0.f;
+    }
+    __syncthreads();
+
+    const StreamArgs streams[2] = {
+        {reinterpret_cast<const uint8_t *>(p.swa_cache_ptr), p.swa_block_stride, p.block_size,
+         p.swa_num_blocks, p.swa_topk, p.swa_indices_ptr, p.swa_lens_ptr},
+        {reinterpret_cast<const uint8_t *>(p.extra_cache_ptr), p.extra_block_stride, p.extra_block_size,
+         p.extra_num_blocks, p.extra_topk, p.extra_indices_ptr, p.extra_lens_ptr},
+    };
+
+    for (int sidx = 0; sidx < 2; ++sidx) {
+        const StreamArgs st = streams[sidx];
+        if (st.cache == nullptr) continue;
+        int len = st.lens[t];
+        const int *idx_row = st.indices + (int64_t)t * st.topk;
+        int num_slots = st.num_blocks * st.block_size;
+
+        for (int base = 0; base < len; base += BLOCK_N) {
+            int n_valid = min(BLOCK_N, len - base);
+            for (int v = tid; v < BLOCK_N * HEAD_DIM; v += NTHREADS) {
+                int n = v / HEAD_DIM, d = v - n * HEAD_DIM;
+                float val = 0.f;
+                if (n < n_valid) {
+                    int slot = idx_row[base + n];
+                    if (slot >= 0 && slot < num_slots) {
+                        const uint8_t *data, *scale;
+                        slot_ptrs(st.cache, st.block_stride, st.block_size, slot, data, scale);
+                        val = decode_k_dim(data, scale, d);
+                    }
+                }
+                s.k_s[n][d] = __float2bfloat16(val);
+            }
+            __syncthreads();
+
+            float sc[2][4];
+#pragma unroll
+            for (int nn = 0; nn < 2; ++nn)
+#pragma unroll
+                for (int j = 0; j < 4; ++j) sc[nn][j] = 0.f;
+            const int ncol0 = warp * 16;
+            const int group = lane >> 2, tig = lane & 3;
+            for (int k = 0; k < KT; ++k) {
+                int k0 = k * 16;
+                uint32_t a[4];
+                a[0] = pack_contig(&s.q_s[group][k0 + tig * 2]);
+                a[1] = pack_contig(&s.q_s[group + 8][k0 + tig * 2]);
+                a[2] = pack_contig(&s.q_s[group][k0 + tig * 2 + 8]);
+                a[3] = pack_contig(&s.q_s[group + 8][k0 + tig * 2 + 8]);
+                uint32_t b0[2], b1[2];
+                b0[0] = pack_contig(&s.k_s[ncol0 + group][k0 + tig * 2]);
+                b0[1] = pack_contig(&s.k_s[ncol0 + group][k0 + tig * 2 + 8]);
+                b1[0] = pack_contig(&s.k_s[ncol0 + 8 + group][k0 + tig * 2]);
+                b1[1] = pack_contig(&s.k_s[ncol0 + 8 + group][k0 + tig * 2 + 8]);
+                mma16816(sc[0], a, b0);
+                mma16816(sc[1], a, b1);
+            }
+#pragma unroll
+            for (int nn = 0; nn < 2; ++nn)
+#pragma unroll
+                for (int j = 0; j < 4; ++j) sc[nn][j] *= p.scale_log2;
+
+            float tmax0 = fmaxf(fmaxf(sc[0][0], sc[0][1]), fmaxf(sc[1][0], sc[1][1]));
+            float tmax1 = fmaxf(fmaxf(sc[0][2], sc[0][3]), fmaxf(sc[1][2], sc[1][3]));
+#pragma unroll
+            for (int o = 1; o < 4; o <<= 1) {
+                tmax0 = fmaxf(tmax0, __shfl_xor_sync(0xffffffffu, tmax0, o));
+                tmax1 = fmaxf(tmax1, __shfl_xor_sync(0xffffffffu, tmax1, o));
+            }
+            if ((lane & 3) == 0) { s.row_scratch[warp][qr0] = tmax0; s.row_scratch[warp][qr0 + 8] = tmax1; }
+            __syncthreads();
+            float tile_m0 = -INFINITY, tile_m1 = -INFINITY;
+#pragma unroll
+            for (int w = 0; w < NWARPS; ++w) {
+                tile_m0 = fmaxf(tile_m0, s.row_scratch[w][qr0]);
+                tile_m1 = fmaxf(tile_m1, s.row_scratch[w][qr0 + 8]);
+            }
+            float nm0 = fmaxf(m0, tile_m0), nm1 = fmaxf(m1, tile_m1);
+            float resc0 = exp2f(m0 - nm0), resc1 = exp2f(m1 - nm1);
+            m0 = nm0; m1 = nm1;
+
+            float ps0 = 0.f, ps1 = 0.f;
+#pragma unroll
+            for (int nn = 0; nn < 2; ++nn) {
+                float p00 = exp2f(sc[nn][0] - m0), p01 = exp2f(sc[nn][1] - m0);
+                float p10 = exp2f(sc[nn][2] - m1), p11 = exp2f(sc[nn][3] - m1);
+                int col = ncol0 + nn * 8 + qc;
+                bool v0 = (col) < n_valid, v1 = (col + 1) < n_valid;
+                p00 = v0 ? p00 : 0.f; p01 = v1 ? p01 : 0.f;
+                p10 = v0 ? p10 : 0.f; p11 = v1 ? p11 : 0.f;
+                ps0 += p00 + p01; ps1 += p10 + p11;
+                s.p_s[qr0][col] = __float2bfloat16(p00);
+                s.p_s[qr0][col + 1] = __float2bfloat16(p01);
+                s.p_s[qr0 + 8][col] = __float2bfloat16(p10);
+                s.p_s[qr0 + 8][col + 1] = __float2bfloat16(p11);
+            }
+#pragma unroll
+            for (int o = 1; o < 4; o <<= 1) {
+                ps0 += __shfl_xor_sync(0xffffffffu, ps0, o);
+                ps1 += __shfl_xor_sync(0xffffffffu, ps1, o);
+            }
+            __syncthreads();
+            if ((lane & 3) == 0) { s.row_scratch[warp][qr0] = ps0; s.row_scratch[warp][qr0 + 8] = ps1; }
+            __syncthreads();
+            float fps0 = 0.f, fps1 = 0.f;
+#pragma unroll
+            for (int w = 0; w < NWARPS; ++w) { fps0 += s.row_scratch[w][qr0]; fps1 += s.row_scratch[w][qr0 + 8]; }
+            l0 = l0 * resc0 + fps0;
+            l1 = l1 * resc1 + fps1;
+
+#pragma unroll
+            for (int d = 0; d < D_PER_WARP / 8; ++d) {
+                acc[d][0] *= resc0; acc[d][1] *= resc0;
+                acc[d][2] *= resc1; acc[d][3] *= resc1;
+            }
+            __syncthreads();
+
+            const int dcol0 = warp * D_PER_WARP;
+            for (int nt = 0; nt < NT; ++nt) {
+                int sl = nt * 16 + tig * 2;
+                uint32_t pa[4];
+                pa[0] = pack_contig(&s.p_s[group][nt * 16 + tig * 2]);
+                pa[1] = pack_contig(&s.p_s[group + 8][nt * 16 + tig * 2]);
+                pa[2] = pack_contig(&s.p_s[group][nt * 16 + tig * 2 + 8]);
+                pa[3] = pack_contig(&s.p_s[group + 8][nt * 16 + tig * 2 + 8]);
+#pragma unroll
+                for (int d8 = 0; d8 < D_PER_WARP / 8; ++d8) {
+                    int dcol = dcol0 + d8 * 8 + group;
+                    uint32_t kb[2];
+                    kb[0] = pack2(s.k_s[sl][dcol], s.k_s[sl + 1][dcol]);
+                    kb[1] = pack2(s.k_s[sl + 8][dcol], s.k_s[sl + 9][dcol]);
+                    mma16816(acc[d8], pa, kb);
+                }
+            }
+            __syncthreads();
+        }
+    }
+
+    int h0 = hb + qr0, h1 = hb + qr0 + 8;
+    float inv0 = 1.f / fmaxf(l0, 1e-20f), inv1 = 1.f / fmaxf(l1, 1e-20f);
+    const int dcol0 = warp * D_PER_WARP;
+    __nv_bfloat16 *o0 = reinterpret_cast<__nv_bfloat16 *>(p.o_ptr)
+        + (int64_t)t * p.out_token_stride + (int64_t)h0 * p.out_head_stride;
+    __nv_bfloat16 *o1 = reinterpret_cast<__nv_bfloat16 *>(p.o_ptr)
+        + (int64_t)t * p.out_token_stride + (int64_t)h1 * p.out_head_stride;
+#pragma unroll
+    for (int d8 = 0; d8 < D_PER_WARP / 8; ++d8) {
+        int col = dcol0 + d8 * 8 + qc;
+        if (h0 < p.num_heads) {
+            o0[col] = __float2bfloat16(acc[d8][0] * inv0);
+            o0[col + 1] = __float2bfloat16(acc[d8][1] * inv0);
+        }
+        if (h1 < p.num_heads) {
+            o1[col] = __float2bfloat16(acc[d8][2] * inv1);
+            o1[col + 1] = __float2bfloat16(acc[d8][3] * inv1);
+        }
+    }
+}
+
+}  // namespace mma_pf
+
 }  // namespace
 
 void run_sparse_mla_decode(Sparse_mla_decode_params &params, cudaStream_t stream) {
+    // Prefill (num_splits==1): a batched tensor-core QK+PV kernel (mma_pf) is available but is
+    // ~2x SLOWER than the FMA path here -- this workload is gather-MEMORY-LATENCY bound, not
+    // QK-compute bound (proven: halving gather volume via BLOCK_H=32 gave 0 gain). The FMA path
+    // hides that latency with cp.async + 16 warps; mma_pf's 64-slot tiles cost 85KB smem -> 1
+    // CTA/SM + only 4 warps, so its gather latency is exposed. Same lesson as tensor-core decode.
+    // Default OFF; opt in with FLASH_MLA_PREFILL_MMA=1 for the batched/larger-BLOCK_M future.
+    static const bool prefill_mma = [] {
+        const char *e = getenv("FLASH_MLA_PREFILL_MMA");
+        return e && (e[0] == '1' || e[0] == 'y' || e[0] == 'Y');
+    }();
+    if (params.num_splits == 1 && prefill_mma) {
+        dim3 grid(params.num_tokens, (params.num_heads + mma_pf::BLOCK_M - 1) / mma_pf::BLOCK_M);
+        int smem = (int)sizeof(mma_pf::Smem);
+        static bool attr_set = false;
+        if (!attr_set) {
+            cudaFuncSetAttribute(mma_pf::sparse_mla_prefill_mma_kernel,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+            attr_set = true;
+        }
+        mma_pf::sparse_mla_prefill_mma_kernel<<<grid, mma_pf::NTHREADS, smem, stream>>>(params);
+        return;
+    }
+
     int head_blocks = (params.num_heads + BLOCK_H - 1) / BLOCK_H;
     if (params.num_splits > 1)  // num_splits==1 fast path writes output directly, no counter/combine
         cudaMemsetAsync(params.combine_counter_ptr, 0,

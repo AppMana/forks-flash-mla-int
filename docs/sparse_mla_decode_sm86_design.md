@@ -122,8 +122,19 @@ Per CTA:
   (cos ~3e-6). `flash_sparse_mla_prefill` interface wrapper + 2 prefill parity tests (T=256/1024,
   variable lens). Throughput **~24.6 us/token** at large T (vs 49 us at T=1 where split-KV fills the
   SMs). BLOCK_H=32 tested for prefill (cuts redundant fp8 decode 4x->2x) — **no win** (24.4 us/tok),
-  so prefill is NOT decode-ALU-redundancy bound; further speedup needs batched tensor-core QK across
-  query tokens (the preserved flash-2 mma path), a separate project.
+  so prefill is NOT decode-ALU-redundancy / gather-volume bound.
+- **PREFILL tensor-core QK+PV (mma_pf) — correct but ~2x SLOWER; default OFF.** Recovered the flash-2
+  `mma.sync.m16n8k16` kernel (BLOCK_M=16 heads/CTA, 4 warps, register-resident O accumulator, two-
+  stream + sink + variable lens, direct write) and wired it as the num_splits==1 prefill path, gated
+  by `FLASH_MLA_PREFILL_MMA` (env, default OFF). Correct (cos 1.78e-6, 6/6 green) but **53 us/tok vs
+  FMA 24.6**. WHY it loses, and why this is a CEILING not a tuning gap: prefill is gather-MEMORY-
+  LATENCY bound (24.6 us/tok = ~6% of bandwidth — the SMs sit idle waiting on the fp8 cache reads).
+  The FMA path hides that latency with cp.async + 16 warps; mma_pf's 64-slot tiles cost 85 KB smem
+  -> 1 CTA/SM + only 4 warps, so its gather latency is fully exposed (and 85 KB leaves no room for a
+  cp.async double-buffer). Tensor cores accelerate QK/PV *compute*, which is OFF the critical path
+  here, so even a perfectly cp.async'd MMA kernel could at best TIE the FMA path (both bounded by the
+  same memory latency), never beat it. Same lesson as tensor-core decode: memory-bound workload, MMA
+  is the wrong tool. Kept opt-in for a future QK-bound regime (much larger BLOCK_M, compute-heavier).
 - **FEATURES validated (6/6 tests):** swa-only, two-stream swa+extra (distinct block sizes),
   attn_sink, MTP/multi-token (s_q=2), variable per-token lens, fp8_ds_mla decode on sm_86, PREFILL
   (large T, num_splits==1 direct-write fast path).
