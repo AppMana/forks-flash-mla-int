@@ -160,9 +160,9 @@ sparse_mla_decode_split_kernel(__grid_constant__ const Sparse_mla_decode_params 
     if (active) {
         // partial out: oaccum[t][h][sp][:] = un-normalized acc ; mlse[t][h][sp] = {m, l}
         int64_t po = (((int64_t)t * p.num_heads + h) * p.num_splits + sp) * HEAD_DIM;
-        float *oacc = reinterpret_cast<float *>(p.oaccum_ptr) + po;
+        __nv_bfloat16 *oacc = reinterpret_cast<__nv_bfloat16 *>(p.oaccum_ptr) + po;
 #pragma unroll
-        for (int i = 0; i < VEC; ++i) oacc[lane + i * 32] = acc[i];
+        for (int i = 0; i < VEC; ++i) oacc[lane + i * 32] = __float2bfloat16(acc[i]);
         if (lane == 0) {
             int64_t pm = ((int64_t)t * p.num_heads + h) * p.num_splits + sp;
             p.mlse_ptr[pm * 2] = m;
@@ -195,9 +195,9 @@ sparse_mla_decode_combine_kernel(__grid_constant__ const Sparse_mla_decode_param
         float scale = exp2f(m_sp - gm);
         if (scale == 0.f) continue;
         gl += l_sp * scale;
-        const float *oacc = reinterpret_cast<float *>(p.oaccum_ptr) + (pm0 + sp) * HEAD_DIM;
+        const __nv_bfloat16 *oacc = reinterpret_cast<const __nv_bfloat16 *>(p.oaccum_ptr) + (pm0 + sp) * HEAD_DIM;
 #pragma unroll
-        for (int i = 0; i < VEC; ++i) acc[i] += oacc[lane + i * 32] * scale;
+        for (int i = 0; i < VEC; ++i) acc[i] += __bfloat162float(oacc[lane + i * 32]) * scale;
     }
     float inv = 1.f / fmaxf(gl, 1e-20f);
     __nv_bfloat16 *out_ptr = reinterpret_cast<__nv_bfloat16 *>(p.o_ptr)

@@ -347,9 +347,9 @@ mha_fwd_sparse_decode_mla(
     if (num_splits > 64) num_splits = 64;
     p.num_splits = num_splits;
 
-    Tensor oaccum = torch::stable::new_empty(q, {T, H, num_splits, D}, ScalarType::Float);
+    Tensor oaccum = torch::stable::new_empty(q, {T, H, num_splits, D});  // bf16 (== q), halves combine traffic
     Tensor mlse = torch::stable::new_empty(q, {T, H, num_splits, 2}, ScalarType::Float);
-    p.oaccum_ptr = reinterpret_cast<float *>(oaccum.data_ptr());
+    p.oaccum_ptr = oaccum.data_ptr();
     p.mlse_ptr = reinterpret_cast<float *>(mlse.data_ptr());
 
     cudaStream_t stream = current_cuda_stream(device);
