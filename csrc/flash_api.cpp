@@ -335,6 +335,23 @@ mha_fwd_sparse_decode_mla(
         p.extra_block_size = extra_cache.value().size(1);
     }
 
+    // split-KV: pick a split count that fills the SMs (T=1 decode otherwise uses few CTAs),
+    // capped so each split keeps >= ~64 slots. Empty splits are cheap + handled by the kernel.
+    int head_blocks = (H + 7) / 8;
+    int max_total = p.swa_topk + (extra_cache.has_value() ? p.extra_topk : 0);
+    int num_splits = props.sm_count * 2 / (T * head_blocks > 0 ? T * head_blocks : 1);
+    int cap_by_slots = (max_total + 63) / 64;
+    if (cap_by_slots < 1) cap_by_slots = 1;
+    if (num_splits > cap_by_slots) num_splits = cap_by_slots;
+    if (num_splits < 1) num_splits = 1;
+    if (num_splits > 64) num_splits = 64;
+    p.num_splits = num_splits;
+
+    Tensor oaccum = torch::stable::new_empty(q, {T, H, num_splits, D}, ScalarType::Float);
+    Tensor mlse = torch::stable::new_empty(q, {T, H, num_splits, 2}, ScalarType::Float);
+    p.oaccum_ptr = reinterpret_cast<float *>(oaccum.data_ptr());
+    p.mlse_ptr = reinterpret_cast<float *>(mlse.data_ptr());
+
     cudaStream_t stream = current_cuda_stream(device);
     run_sparse_mla_decode(p, stream);
     return out;

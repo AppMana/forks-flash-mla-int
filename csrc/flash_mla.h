@@ -90,6 +90,10 @@ struct Sparse_mla_decode_params {
     const int *extra_indices_ptr;
     const int *extra_lens_ptr;
     int extra_topk, extra_num_blocks, extra_block_size;
+    // split-KV (flash-decoding): partial buffers + split count, filled by the binding.
+    float *oaccum_ptr;   // [T, H, num_splits, 512] un-normalized acc per split
+    float *mlse_ptr;     // [T, H, num_splits, 2]   {running max m, denom l} per split
+    int num_splits;
 };
 
 void run_sparse_mla_decode(Sparse_mla_decode_params &params, cudaStream_t stream);
