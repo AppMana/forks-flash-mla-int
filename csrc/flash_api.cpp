@@ -337,7 +337,7 @@ mha_fwd_sparse_decode_mla(
 
     // split-KV: pick a split count that fills the SMs (T=1 decode otherwise uses few CTAs),
     // capped so each split keeps >= ~64 slots. Empty splits are cheap + handled by the kernel.
-    int head_blocks = (H + 7) / 8;
+    int head_blocks = (H + 15) / 16;
     int max_total = p.swa_topk + (extra_cache.has_value() ? p.extra_topk : 0);
     int num_splits = props.sm_count * 3 / (T * head_blocks > 0 ? T * head_blocks : 1);
     int cap_by_slots = (max_total + 31) / 32;

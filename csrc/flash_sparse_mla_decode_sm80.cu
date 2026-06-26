@@ -26,9 +26,9 @@ constexpr int SCALE_GROUP = 64;
 constexpr int HEAD_DIM = 512;
 constexpr int VEC = HEAD_DIM / 32;        // 16 dims/lane
 constexpr float LOG2E = 1.4426950408889634f;
-constexpr int BLOCK_H = 8;                // heads/CTA (one warp each)
-constexpr int BLOCK_N = 16;               // selected slots per tile (16KB K_s -> ~100% occ)
-constexpr int NTHREADS = BLOCK_H * 32;    // 256
+constexpr int BLOCK_H = 16;               // heads/CTA (one warp each) — fewer head-blocks => less redundant fp8 decode
+constexpr int BLOCK_N = 16;               // selected slots per tile
+constexpr int NTHREADS = BLOCK_H * 32;    // 512
 
 __device__ __forceinline__ float decode_k_dim(const uint8_t *data, const uint8_t *scale, int d) {
     if (d < FP8_DIM) {
