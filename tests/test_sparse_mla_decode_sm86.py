@@ -105,3 +105,57 @@ def test_sparse_mla_decode_parity(H, topk):
     )
     cd = cos_diff(out.float(), O_ref)
     assert cd < 8e-5, f"sparse-MLA decode cos_diff={cd:.2e} (H={H} topk={topk})"
+
+
+def _build_cache(num_slots, block_size, dev):
+    nb = (num_slots + block_size - 1) // block_size
+    cache = torch.zeros(nb, block_size, _TOKEN_DATA_SIZE + _SCALE_DIM, dtype=torch.uint8, device=dev)
+    K = torch.zeros(nb * block_size, _HEAD_DIM, dtype=torch.bfloat16, device=dev)
+    for slot in range(num_slots):
+        K[slot] = _write_fp8_ds_mla_token(cache, slot, block_size)
+    return cache, K
+
+
+@pytest.mark.parametrize("H", [64])
+@pytest.mark.parametrize("s_q", [1, 2])  # MTP: >1 decode token per sequence
+def test_sparse_mla_decode_two_stream(H, s_q):
+    """swa + extra streams (different block sizes), attn_sink, multi-token (MTP)."""
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
+        pytest.skip("requires Ampere (capability 8.x)")
+    from flash_mla import flash_sparse_mla_decode
+
+    torch.manual_seed(1)
+    dev = "cuda"
+    T = 3 * s_q
+    swa_topk, extra_topk = 384, 256
+    scale = 1.0 / math.sqrt(_HEAD_DIM)
+    # swa block_size 32, extra (compressed) block_size 16 — exercises distinct strides
+    swa_cache, swa_K = _build_cache(swa_topk + 48, 32, dev)
+    extra_cache, extra_K = _build_cache(extra_topk + 48, 16, dev)
+    swa_slots, extra_slots = swa_K.shape[0], extra_K.shape[0]
+
+    q = torch.randn(T, H, _HEAD_DIM, device=dev, dtype=torch.bfloat16)
+    swa_lens = torch.randint(swa_topk // 2, swa_topk + 1, (T,), dtype=torch.int32, device=dev)
+    extra_lens = torch.randint(extra_topk // 2, extra_topk + 1, (T,), dtype=torch.int32, device=dev)
+    swa_idx = torch.stack([torch.randperm(swa_slots, device=dev)[:swa_topk].to(torch.int32) for _ in range(T)])
+    extra_idx = torch.stack([torch.randperm(extra_slots, device=dev)[:extra_topk].to(torch.int32) for _ in range(T)])
+    attn_sink = torch.randn(H, device=dev, dtype=torch.float32) * 0.1
+
+    # fp32 ref: attend over concatenated [swa selected ; extra selected]
+    O_ref = torch.zeros(T, H, _HEAD_DIM, device=dev, dtype=torch.float32)
+    for t in range(T):
+        ns, ne = int(swa_lens[t]), int(extra_lens[t])
+        K = torch.cat([swa_K[swa_idx[t, :ns].long()], extra_K[extra_idx[t, :ne].long()]]).float()
+        sc = (q[t].float() @ K.t()) * scale
+        sink = attn_sink[:, None].float()
+        mx = torch.maximum(sc.max(-1, keepdim=True).values, sink)
+        ex = torch.exp(sc - mx)
+        O_ref[t] = (ex @ K) / (ex.sum(-1, keepdim=True) + torch.exp(sink - mx))
+
+    out = flash_sparse_mla_decode(
+        q=q, swa_cache=swa_cache, swa_indices=swa_idx, swa_lens=swa_lens,
+        scale=scale, attn_sink=attn_sink,
+        extra_cache=extra_cache, extra_indices=extra_idx, extra_lens=extra_lens,
+    )
+    cd = cos_diff(out.float(), O_ref)
+    assert cd < 8e-5, f"two-stream sparse-MLA cos_diff={cd:.2e} (H={H} s_q={s_q})"
