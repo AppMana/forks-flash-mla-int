@@ -11,6 +11,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp8.h>
 #include <cuda_bf16.h>
+#include <cuda_pipeline.h>
 #include <cstdint>
 #include <math.h>
 
@@ -90,8 +91,13 @@ sparse_mla_decode_split_kernel(__grid_constant__ const Sparse_mla_decode_params 
     const bool active = h < p.num_heads;
 
     __shared__ __nv_bfloat16 K_s[BLOCK_N][HEAD_DIM];
-    __shared__ int slot_s[BLOCK_N];
-    __shared__ uint8_t stream_s[BLOCK_N];
+    // cp.async double-buffer: raw token bytes (data + scale) staged from global while the
+    // previous tile computes; decode (fp8->bf16) reads from smem, off the global-latency path.
+    __shared__ __align__(16) uint8_t raw_s[2][BLOCK_N][TOKEN_DATA_SIZE];
+    __shared__ uint8_t rawsc_s[2][BLOCK_N][SCALE_DIM];
+    __shared__ const uint8_t *src_data_s[2][BLOCK_N];
+    __shared__ const uint8_t *src_scale_s[2][BLOCK_N];
+    __shared__ int rslot_s[2][BLOCK_N];
 
     const int swa_len = p.swa_lens_ptr[t];
     const int extra_len = (p.extra_cache_ptr != nullptr) ? p.extra_lens_ptr[t] : 0;
@@ -121,65 +127,103 @@ sparse_mla_decode_split_kernel(__grid_constant__ const Sparse_mla_decode_params 
     const int swa_slots = p.swa_num_blocks * p.block_size;
     const int extra_slots = p.extra_num_blocks * p.extra_block_size;
 
-    for (int base = g_start; base < g_end; base += BLOCK_N) {
-        int n_valid = min(BLOCK_N, g_end - base);
+    const int n_tiles = (g_end > g_start) ? (g_end - g_start + BLOCK_N - 1) / BLOCK_N : 0;
+
+    // resolve tile's slot indices + global source pointers into smem[buf] (8 threads idle ok).
+    auto resolve = [&](int tile, int buf) {
         if (tid < BLOCK_N) {
-            if (tid < n_valid) {
-                int g = base + tid;
-                if (g < swa_len) { slot_s[tid] = p.swa_indices_ptr[(int64_t)t * p.swa_topk + g]; stream_s[tid] = 0; }
-                else { slot_s[tid] = p.extra_indices_ptr[(int64_t)t * p.extra_topk + (g - swa_len)]; stream_s[tid] = 1; }
-            } else { slot_s[tid] = -1; stream_s[tid] = 0; }
-        }
-        __syncthreads();
-        // vectorized gather: 2 dims/thread. fp8 decoded 2-at-a-time (cvt_fp8x2, one scale/pair,
-        // d even => same 64-group); RoPE is already bf16 -> direct copy (no convert).
-        for (int vp = tid; vp < BLOCK_N * (HEAD_DIM / 2); vp += NTHREADS) {
-            int n = vp / (HEAD_DIM / 2), d = (vp - n * (HEAD_DIM / 2)) * 2;
-            __nv_bfloat16 v0 = __float2bfloat16(0.f), v1 = v0;
-            if (n < n_valid) {
-                int slot = slot_s[n];
-                int is_ex = stream_s[n];
+            int g = g_start + tile * BLOCK_N + tid;
+            int slot = -1; const uint8_t *dptr = nullptr, *sptr = nullptr;
+            if (g < g_end) {
+                int is_ex = (g >= swa_len);
+                int s = is_ex ? p.extra_indices_ptr[(int64_t)t * p.extra_topk + (g - swa_len)]
+                              : p.swa_indices_ptr[(int64_t)t * p.swa_topk + g];
                 const uint8_t *cache = is_ex ? extra_cache : swa_cache;
                 int64_t bstride = is_ex ? p.extra_block_stride : p.swa_block_stride;
                 int bsize = is_ex ? p.extra_block_size : p.block_size;
                 int nslots = is_ex ? extra_slots : swa_slots;
-                if (slot >= 0 && slot < nslots) {
-                    const uint8_t *data, *scale;
-                    slot_ptrs(cache, bstride, bsize, slot, data, scale);
-                    if (d < FP8_DIM) {
-                        unsigned short raw2 = *reinterpret_cast<const unsigned short *>(data + d);
-                        __half2 h2 = __half2(__nv_cvt_fp8x2_to_halfraw2(raw2, __NV_E4M3));
-                        float sc = ldexpf(1.f, (int)scale[d / SCALE_GROUP] - 127);
-                        v0 = __float2bfloat16(__low2float(h2) * sc);
-                        v1 = __float2bfloat16(__high2float(h2) * sc);
-                    } else {
-                        const __nv_bfloat16 *rope = reinterpret_cast<const __nv_bfloat16 *>(data + FP8_DIM);
-                        v0 = rope[d - FP8_DIM];
-                        v1 = rope[d + 1 - FP8_DIM];
-                    }
+                if (s >= 0 && s < nslots) { slot = s; slot_ptrs(cache, bstride, bsize, s, dptr, sptr); }
+            }
+            rslot_s[buf][tid] = slot;
+            src_data_s[buf][tid] = dptr;
+            src_scale_s[buf][tid] = sptr;
+        }
+    };
+
+    // cp.async the raw bytes for buf (8-byte chunks: safe for any block_size alignment).
+    auto issue_copies = [&](int buf) {
+        for (int vp = tid; vp < BLOCK_N * (TOKEN_DATA_SIZE / 8); vp += NTHREADS) {
+            int n = vp / (TOKEN_DATA_SIZE / 8), c = (vp - n * (TOKEN_DATA_SIZE / 8)) * 8;
+            const uint8_t *src = src_data_s[buf][n];
+            if (src != nullptr) __pipeline_memcpy_async(&raw_s[buf][n][c], src + c, 8);
+        }
+        if (tid < BLOCK_N) {
+            const uint8_t *src = src_scale_s[buf][tid];
+            if (src != nullptr) __pipeline_memcpy_async(&rawsc_s[buf][tid][0], src, SCALE_DIM);
+        }
+        __pipeline_commit();
+    };
+
+    // decode staged raw bytes (smem) -> K_s. 2 dims/thread, cvt_fp8x2 per pair; RoPE direct bf16.
+    auto decode_tile = [&](int buf, int n_valid) {
+        for (int vp = tid; vp < BLOCK_N * (HEAD_DIM / 2); vp += NTHREADS) {
+            int n = vp / (HEAD_DIM / 2), d = (vp - n * (HEAD_DIM / 2)) * 2;
+            __nv_bfloat16 v0 = __float2bfloat16(0.f), v1 = v0;
+            if (n < n_valid && rslot_s[buf][n] >= 0) {
+                const uint8_t *data = raw_s[buf][n];
+                if (d < FP8_DIM) {
+                    unsigned short raw2 = *reinterpret_cast<const unsigned short *>(data + d);
+                    __half2 h2 = __half2(__nv_cvt_fp8x2_to_halfraw2(raw2, __NV_E4M3));
+                    float sc = ldexpf(1.f, (int)rawsc_s[buf][n][d / SCALE_GROUP] - 127);
+                    v0 = __float2bfloat16(__low2float(h2) * sc);
+                    v1 = __float2bfloat16(__high2float(h2) * sc);
+                } else {
+                    const __nv_bfloat16 *rope = reinterpret_cast<const __nv_bfloat16 *>(data + FP8_DIM);
+                    v0 = rope[d - FP8_DIM];
+                    v1 = rope[d + 1 - FP8_DIM];
                 }
             }
             K_s[n][d] = v0;
             K_s[n][d + 1] = v1;
         }
+    };
+
+    if (n_tiles > 0) {
+        resolve(0, 0);
         __syncthreads();
-        if (active) {
-            for (int n = 0; n < n_valid; ++n) {
-                float dot = 0.f;
-#pragma unroll
-                for (int i = 0; i < VEC; ++i) dot += q_reg[i] * __bfloat162float(K_s[n][lane + i * 32]);
-                float s = warp_sum(dot) * p.scale_log2;
-                float m_new = fmaxf(m, s);
-                float resc = exp2f(m - m_new);
-                float pj = exp2f(s - m_new);
-                l = l * resc + pj;
-#pragma unroll
-                for (int i = 0; i < VEC; ++i)
-                    acc[i] = acc[i] * resc + pj * __bfloat162float(K_s[n][lane + i * 32]);
-                m = m_new;
+        issue_copies(0);
+        for (int i = 0; i < n_tiles; ++i) {
+            int buf = i & 1;
+            if (i + 1 < n_tiles) {
+                resolve(i + 1, (i + 1) & 1);
+                __syncthreads();           // src ptrs for i+1 visible before issuing its copies
+                issue_copies((i + 1) & 1);
+                __pipeline_wait_prior(1);  // keep i+1 in flight, wait tile i
+            } else {
+                __pipeline_wait_prior(0);
             }
+            __syncthreads();               // all threads' cp.async for tile i complete + visible
+            int n_valid = min(BLOCK_N, g_end - (g_start + i * BLOCK_N));
+            decode_tile(buf, n_valid);
+            __syncthreads();
+            if (active) {
+                for (int n = 0; n < n_valid; ++n) {
+                    float dot = 0.f;
+#pragma unroll
+                    for (int i2 = 0; i2 < VEC; ++i2) dot += q_reg[i2] * __bfloat162float(K_s[n][lane + i2 * 32]);
+                    float s = warp_sum(dot) * p.scale_log2;
+                    float m_new = fmaxf(m, s);
+                    float resc = exp2f(m - m_new);
+                    float pj = exp2f(s - m_new);
+                    l = l * resc + pj;
+#pragma unroll
+                    for (int i2 = 0; i2 < VEC; ++i2)
+                        acc[i2] = acc[i2] * resc + pj * __bfloat162float(K_s[n][lane + i2 * 32]);
+                    m = m_new;
+                }
+            }
+            __syncthreads();
         }
-        __syncthreads();
     }
 
     if (active) {
