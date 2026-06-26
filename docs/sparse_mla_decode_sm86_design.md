@@ -94,9 +94,23 @@ Per CTA:
     writes the bf16 output. Eliminates the 2nd launch + the kernel-relaunch oaccum round-trip.
     56.5->53.6 us. 4/4 parity green (atomic + threadfence give the needed cross-CTA ordering:
     every split's oaccum/mlse write is visible to the last CTA before it reduces).
-  - Remaining ideas (diminishing returns): cp.async gather prefetch (but NOT latency-bound per the
-    occupancy test). Tensor cores become worth it only at batched/MTP decode where M grows (the
-    flash-2 mma kernel is preserved in git history for that).
+  - **cp.async double-buffered gather (commit 0f841b9):** each tile's raw fp8+rope cache bytes are
+    `cp.async`-staged into a 2-deep smem ring while the previous tile computes; the fp8 decode then
+    reads smem, off the global-load-latency path. Neutral at topk=512 (49.4 us — only ~2 tiles/split
+    at the 32-slot sweet spot, so little to overlap) but **78.5 -> 74.4 us at topk=1024** (~5%, more
+    tiles => more overlap). 4/4 parity green. A num_splits sweep with the pipeline confirms 32
+    slots/split is still the sweet spot (coarser splits improve under prefetch — 64@1024: 84.5->73.5 —
+    but stay slower than 32). One OOB found+fixed via compute-sanitizer: `issue_copies` was passed the
+    tile index instead of the buffer parity, indexing `raw_s[2+]` past the 2-deep ring.
+  - **num_splits is env-tunable (commit a7bbae8):** `FLASH_MLA_SLOTS_PER_SPLIT` (default 32) lets the
+    cluster retune per real serving shape without a rebuild. Sweep on A5000: 16->54.6, 24->59.9,
+    **32->49.4**, 48->64.2, 64->80.4, 96->104.1 us @ topk=512. 32 is the floor.
+  - Full journey: P1 2917 -> K-share 850 -> split-KV 121 -> vec-gather 69 -> BLOCK_N16 68 ->
+    BLOCK_H16 59.8 -> bf16-oaccum 56.5 -> fused-combine 53.6 -> **cp.async 49.4 us @ topk=512 /
+    74.4 us @ topk=1024** (vs Triton ~217 -> **4.4x / 2.9x**). Parameter space fully mapped.
+  - Remaining ideas (genuine diminishing returns, kernel at its floor for T=1): tensor cores become
+    worth it only at batched/MTP decode where M grows (the flash-2 mma kernel is preserved in git
+    history for that). Next highest-value step is integration (P4), not more kernel micro-tuning.
 - **FEATURES validated (4/4 tests):** swa-only, two-stream swa+extra (distinct block sizes),
   attn_sink, MTP/multi-token (s_q=2), variable per-token lens, fp8_ds_mla decode on sm_86.
 - **P4 integrate:** env-gated dispatch in `nvidia_sm86._forward_decode` (the gather-then-call shim)
