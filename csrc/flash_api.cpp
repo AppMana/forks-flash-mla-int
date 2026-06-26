@@ -340,7 +340,11 @@ mha_fwd_sparse_decode_mla(
     int head_blocks = (H + 15) / 16;
     int max_total = p.swa_topk + (extra_cache.has_value() ? p.extra_topk : 0);
     int num_splits = props.sm_count * 3 / (T * head_blocks > 0 ? T * head_blocks : 1);
-    int cap_by_slots = (max_total + 31) / 32;
+    // slots/split target (env-tunable for sweeps); default 32. Coarser = fewer splits =
+    // more tiles/CTA + less combine traffic; finer = more parallelism.
+    int slots_per_split = 32;
+    if (const char *e = getenv("FLASH_MLA_SLOTS_PER_SPLIT")) { int v = atoi(e); if (v > 0) slots_per_split = v; }
+    int cap_by_slots = (max_total + slots_per_split - 1) / slots_per_split;
     if (cap_by_slots < 1) cap_by_slots = 1;
     if (num_splits > cap_by_slots) num_splits = cap_by_slots;
     if (num_splits < 1) num_splits = 1;

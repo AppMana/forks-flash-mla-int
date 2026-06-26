@@ -84,11 +84,19 @@ Per CTA:
   - `num_splits` cap = ~32 slots/split (16 splits @ topk=512, ~1 wave). Finer (16 slots/split)
     REGRESSED (66 us — combine/oaccum global traffic outweighs extra parallelism).
   - Full journey: P1 2917 -> K-share 850 -> split-KV 121 -> vec-gather 69 -> BLOCK_N16 68 ->
-    BLOCK_H16 **59.8 us**. Parameter space mapped; this is the tuned sweet spot.
+    BLOCK_H16 59.8 -> bf16-oaccum 56.5 -> **fused-combine 53.6 us @ topk=512** (78.6 @ topk=1024).
+  - **bf16 oaccum (commit ad3c8c1):** un-normalized acc written as bf16 (not fp32) — halves the
+    oaccum global write/read traffic. 59.8->56.5 us. cos still < 8e-5 (the partial accs are small,
+    bf16 mantissa is enough since the final combine re-normalizes in fp32).
+  - **fused combine (commit 4ee3cd2):** instead of a 2nd kernel launch reading every split's
+    partial, the split CTAs share an atomic counter per (token, head_block); after `__threadfence()`
+    the LAST split CTA to arrive runs the log-sum-exp reduction (`combine_one_head`) in-kernel and
+    writes the bf16 output. Eliminates the 2nd launch + the kernel-relaunch oaccum round-trip.
+    56.5->53.6 us. 4/4 parity green (atomic + threadfence give the needed cross-CTA ordering:
+    every split's oaccum/mlse write is visible to the last CTA before it reduces).
   - Remaining ideas (diminishing returns): cp.async gather prefetch (but NOT latency-bound per the
-    occupancy test), fuse split+combine into one launch (cooperative-groups grid.sync, kills the
-    2nd-launch + oaccum round-trip), bf16 oaccum. Tensor cores become worth it only at batched/MTP
-    decode where M grows (the flash-2 mma kernel is preserved in git history for that).
+    occupancy test). Tensor cores become worth it only at batched/MTP decode where M grows (the
+    flash-2 mma kernel is preserved in git history for that).
 - **FEATURES validated (4/4 tests):** swa-only, two-stream swa+extra (distinct block sizes),
   attn_sink, MTP/multi-token (s_q=2), variable per-token lens, fp8_ds_mla decode on sm_86.
 - **P4 integrate:** env-gated dispatch in `nvidia_sm86._forward_decode` (the gather-then-call shim)
