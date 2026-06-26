@@ -66,11 +66,13 @@ Per CTA:
     at BLOCK_H=8) for the whole problem; the GPU's 64 SMs starve. M=16 is tiny for MMA (most
     of the 16x8 tile idle). The kernel is parallelism- and memory-bound, not compute-bound,
     so swapping the (already-cheap) dot for MMA doesn't help and adds smem/occupancy overhead.
-- **The real lever to beat Triton = SPLIT-KV (flash-decoding), NOT tensor cores:** split the
-  topk across many CTAs (e.g. 4-8 splits) -> 4-8x more CTAs -> fills the SMs -> + a combine
-  pass (log-sum-exp merge of the per-split partials). Plus vectorized fp8 dequant / cp.async on
-  the gather. This is the next major effort (a different parallelization of the SAME correct
-  inner loop the K-share kernel already has).
+- **P2 SPLIT-KV (flash-decoding) — THE WIN. 121 us @ topk=512, 136 us @ topk=1024.** BEATS the
+  production Triton decode (~217 us) by **1.8x**. cos<8e-5. (commit 81a7b23, shipped.)
+  Each (token, head-block, split) CTA processes a slice of the concatenated swa+extra selection
+  and writes a PARTIAL (un-normalized acc + running max m + denom l); a combine kernel merges
+  the splits per (token, head) via log-sum-exp and applies attn_sink once. `num_splits` auto-
+  sized to ~2*SM_count, capped to >= ~64 slots/split. This is the same correct K-share inner
+  loop, re-parallelized — filling the SMs at T=1 is what mattered (NOT tensor cores).
 - **P3 int8 KV:** NOT a memory win here — the cache is already fp8 (8-bit). Skip.
 - **P4 integrate:** env-gated dispatch in `nvidia_sm86`; the gather-then-dense shim. Deferred
   until the kernel actually beats Triton (split-KV).
