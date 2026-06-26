@@ -53,6 +53,31 @@ __device__ __forceinline__ float warp_sum(float v) {
     return v;
 }
 
+// merge all splits for one (token, head) via log-sum-exp + attn_sink, write final output.
+// (run by the last split-CTA to finish for this (t, head_block) — fused, no 2nd launch.)
+__device__ __forceinline__ void combine_one_head(const Sparse_mla_decode_params &p, int t, int h, int lane) {
+    const int64_t pm0 = ((int64_t)t * p.num_heads + h) * p.num_splits;
+    float gm = (p.attn_sink_ptr != nullptr) ? p.attn_sink_ptr[h] * LOG2E : -INFINITY;
+    for (int sp = 0; sp < p.num_splits; ++sp) gm = fmaxf(gm, p.mlse_ptr[(pm0 + sp) * 2]);
+    float gl = (p.attn_sink_ptr != nullptr) ? exp2f(p.attn_sink_ptr[h] * LOG2E - gm) : 0.f;
+    float cacc[VEC];
+#pragma unroll
+    for (int i = 0; i < VEC; ++i) cacc[i] = 0.f;
+    for (int sp = 0; sp < p.num_splits; ++sp) {
+        float scale = exp2f(p.mlse_ptr[(pm0 + sp) * 2] - gm);
+        if (scale == 0.f) continue;
+        gl += p.mlse_ptr[(pm0 + sp) * 2 + 1] * scale;
+        const __nv_bfloat16 *oacc = reinterpret_cast<const __nv_bfloat16 *>(p.oaccum_ptr) + (pm0 + sp) * HEAD_DIM;
+#pragma unroll
+        for (int i = 0; i < VEC; ++i) cacc[i] += __bfloat162float(oacc[lane + i * 32]) * scale;
+    }
+    float inv = 1.f / fmaxf(gl, 1e-20f);
+    __nv_bfloat16 *out_ptr = reinterpret_cast<__nv_bfloat16 *>(p.o_ptr)
+        + (int64_t)t * p.out_token_stride + (int64_t)h * p.out_head_stride;
+#pragma unroll
+    for (int i = 0; i < VEC; ++i) out_ptr[lane + i * 32] = __float2bfloat16(cacc[i] * inv);
+}
+
 // ---- main kernel: grid (T, head_blocks, num_splits) -> partial (acc, m, l) per split ----
 __global__ void __launch_bounds__(NTHREADS)
 sparse_mla_decode_split_kernel(__grid_constant__ const Sparse_mla_decode_params p) {
@@ -169,49 +194,29 @@ sparse_mla_decode_split_kernel(__grid_constant__ const Sparse_mla_decode_params 
             p.mlse_ptr[pm * 2 + 1] = l;
         }
     }
-}
 
-// ---- combine: grid (T, head_blocks) -> merge splits per (token, head), apply attn_sink ----
-__global__ void __launch_bounds__(NTHREADS)
-sparse_mla_decode_combine_kernel(__grid_constant__ const Sparse_mla_decode_params p) {
-    const int t = blockIdx.x;
-    const int tid = threadIdx.x;
-    const int warp = tid >> 5;
-    const int lane = tid & 31;
-    const int h = blockIdx.y * BLOCK_H + warp;
-    if (h >= p.num_heads) return;
-
-    const int64_t pm0 = ((int64_t)t * p.num_heads + h) * p.num_splits;
-    float gm = (p.attn_sink_ptr != nullptr) ? p.attn_sink_ptr[h] * LOG2E : -INFINITY;
-    for (int sp = 0; sp < p.num_splits; ++sp) gm = fmaxf(gm, p.mlse_ptr[(pm0 + sp) * 2]);
-
-    float gl = (p.attn_sink_ptr != nullptr) ? exp2f(p.attn_sink_ptr[h] * LOG2E - gm) : 0.f;
-    float acc[VEC];
-#pragma unroll
-    for (int i = 0; i < VEC; ++i) acc[i] = 0.f;
-    for (int sp = 0; sp < p.num_splits; ++sp) {
-        float m_sp = p.mlse_ptr[(pm0 + sp) * 2];
-        float l_sp = p.mlse_ptr[(pm0 + sp) * 2 + 1];
-        float scale = exp2f(m_sp - gm);
-        if (scale == 0.f) continue;
-        gl += l_sp * scale;
-        const __nv_bfloat16 *oacc = reinterpret_cast<const __nv_bfloat16 *>(p.oaccum_ptr) + (pm0 + sp) * HEAD_DIM;
-#pragma unroll
-        for (int i = 0; i < VEC; ++i) acc[i] += __bfloat162float(oacc[lane + i * 32]) * scale;
+    // fused combine: the LAST split-CTA to finish for this (t, head_block) merges all splits
+    // (split-K reduction pattern) -> no separate combine launch + no host round-trip.
+    __threadfence();        // make this CTA's partials globally visible
+    __syncthreads();
+    __shared__ bool s_last;
+    if (tid == 0) {
+        int cidx = t * (int)gridDim.y + (int)blockIdx.y;
+        s_last = (atomicAdd(&p.combine_counter_ptr[cidx], 1) == p.num_splits - 1);
     }
-    float inv = 1.f / fmaxf(gl, 1e-20f);
-    __nv_bfloat16 *out_ptr = reinterpret_cast<__nv_bfloat16 *>(p.o_ptr)
-        + (int64_t)t * p.out_token_stride + (int64_t)h * p.out_head_stride;
-#pragma unroll
-    for (int i = 0; i < VEC; ++i) out_ptr[lane + i * 32] = __float2bfloat16(acc[i] * inv);
+    __syncthreads();
+    if (s_last) {
+        __threadfence();    // acquire every CTA's partials
+        if (active) combine_one_head(p, t, h, lane);
+    }
 }
 
 }  // namespace
 
 void run_sparse_mla_decode(Sparse_mla_decode_params &params, cudaStream_t stream) {
     int head_blocks = (params.num_heads + BLOCK_H - 1) / BLOCK_H;
+    cudaMemsetAsync(params.combine_counter_ptr, 0,
+                    (size_t)params.num_tokens * head_blocks * sizeof(int), stream);
     dim3 grid(params.num_tokens, head_blocks, params.num_splits);
     sparse_mla_decode_split_kernel<<<grid, NTHREADS, 0, stream>>>(params);
-    dim3 cgrid(params.num_tokens, head_blocks);
-    sparse_mla_decode_combine_kernel<<<cgrid, NTHREADS, 0, stream>>>(params);
 }
