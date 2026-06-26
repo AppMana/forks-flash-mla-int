@@ -52,17 +52,28 @@ Per CTA:
    d. `acc += p @ K`  (V == K).
 4. `out[BLOCK_H,512] = acc / max(e_sum, eps)` → bf16.
 
-### Phasing (TDD red→green per phase, validated vs the torch oracle)
-- **P0 (now):** torch oracle (reuse `_write_fp8_ds_mla_token`) + red test + C++ API + params + a
-  STUB kernel that fails the numeric assertion.
-- **P1 correctness:** a straightforward kernel — sparse gather + fp8 dequant + softmax + PV with
-  **fp32 FMA** math (no tensor cores). Goal: cos < the oracle bound vs fp32, ANY speed. Proves the
-  gather/dequant/softmax dataflow in isolation from MMA layout complexity.
-- **P2 tensor cores:** replace QK/PV with `mma.sync m16n8k16` bf16 (pad BLOCK_H 8→16); smem swizzle
-  + `cp.async` double-buffer (kP=2) within the 100KB budget; vectorized fp8 dequant.
-- **P3 int8 KV (the bf16-Q + int8-KV win):** read int8 NoPE instead of fp8 (per-token scale),
-  halving K traffic + smem; bf16 Q, bf16 PV. Needs the int8 cache writer (separate).
-- **P4 integrate + bench:** env-gated dispatch in `nvidia_sm86`, bench vs the Triton decode on a 3090.
+### Phasing + MEASURED RESULTS (A5000 sm_86, T=1 H=64 topk=512, vs live Triton ~217us)
+- **P0 done:** torch oracle + red test + C++ API + params (committed).
+- **P1 done (correct):** warp-per-head, fp32 FMA. **2917 us.** cos<8e-5. (commit 38f09b4)
+- **P2 K-share done (correct, BEST):** gather+dequant K once into smem, reuse across heads.
+  **850 us** (3.4x). cos<8e-5. (commit 67c8cd6) — THIS is the shipped kernel.
+- **P2 tensor cores — DEAD END for this workload (both tried, both correct, both SLOWER):**
+  - naive WMMA 16x16x16: **1463 us** (acc round-trips smem every tile; warp-0-only QK).
+  - flash-2 raw `mma.sync.m16n8k16` (register-resident acc, layout-aware per-row rescale,
+    cross-warp max+sum reductions): **1345 us.** Correct (manual fragment loads from the
+    documented PTX operand layout; the last bug was a per-warp vs cross-warp softmax DENOM).
+  - **Why tensor cores lose here:** T=1 decode has M=16 heads/CTA -> only H/16 = 4 CTAs (or 8
+    at BLOCK_H=8) for the whole problem; the GPU's 64 SMs starve. M=16 is tiny for MMA (most
+    of the 16x8 tile idle). The kernel is parallelism- and memory-bound, not compute-bound,
+    so swapping the (already-cheap) dot for MMA doesn't help and adds smem/occupancy overhead.
+- **The real lever to beat Triton = SPLIT-KV (flash-decoding), NOT tensor cores:** split the
+  topk across many CTAs (e.g. 4-8 splits) -> 4-8x more CTAs -> fills the SMs -> + a combine
+  pass (log-sum-exp merge of the per-split partials). Plus vectorized fp8 dequant / cp.async on
+  the gather. This is the next major effort (a different parallelization of the SAME correct
+  inner loop the K-share kernel already has).
+- **P3 int8 KV:** NOT a memory win here — the cache is already fp8 (8-bit). Skip.
+- **P4 integrate:** env-gated dispatch in `nvidia_sm86`; the gather-then-dense shim. Deferred
+  until the kernel actually beats Triton (split-KV).
 
 ## API
 `csrc/flash_sparse_mla_decode_sm80.{h,cu}`; binding `flash_mla_cuda.fwd_sparse_decode_mla` (stable
