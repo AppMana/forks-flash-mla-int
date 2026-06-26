@@ -111,8 +111,22 @@ Per CTA:
   - Remaining ideas (genuine diminishing returns, kernel at its floor for T=1): tensor cores become
     worth it only at batched/MTP decode where M grows (the flash-2 mma kernel is preserved in git
     history for that). Next highest-value step is integration (P4), not more kernel micro-tuning.
-- **FEATURES validated (4/4 tests):** swa-only, two-stream swa+extra (distinct block sizes),
-  attn_sink, MTP/multi-token (s_q=2), variable per-token lens, fp8_ds_mla decode on sm_86.
+- **PREFILL — same kernel, num_splits==1 fast path (commit ccce5f9).** Sparse-MLA prefill is the
+  identical absorbed attention as decode (V==K, head_dim 512, attn_sink merged once; causality is
+  already encoded in the per-query selected indices — no extra causal mask, confirmed against
+  upstream `reference_sparse_mla_prefill`). The only difference is many query tokens (large T). The
+  decode kernel already loops over T tokens each with their own selection; at large T `num_splits`
+  auto-collapses to 1. Added a `num_splits==1` fast path: each (token, head-block) CTA normalizes +
+  applies sink + writes output in-register, skipping the split-KV oaccum/mlse/combine; the binding
+  skips those allocations (oaccum alone was T*H*512 bf16 = **134 MB at T=2048**). Correct at every T
+  (cos ~3e-6). `flash_sparse_mla_prefill` interface wrapper + 2 prefill parity tests (T=256/1024,
+  variable lens). Throughput **~24.6 us/token** at large T (vs 49 us at T=1 where split-KV fills the
+  SMs). BLOCK_H=32 tested for prefill (cuts redundant fp8 decode 4x->2x) — **no win** (24.4 us/tok),
+  so prefill is NOT decode-ALU-redundancy bound; further speedup needs batched tensor-core QK across
+  query tokens (the preserved flash-2 mma path), a separate project.
+- **FEATURES validated (6/6 tests):** swa-only, two-stream swa+extra (distinct block sizes),
+  attn_sink, MTP/multi-token (s_q=2), variable per-token lens, fp8_ds_mla decode on sm_86, PREFILL
+  (large T, num_splits==1 direct-write fast path).
 - **P4 integrate:** env-gated dispatch in `nvidia_sm86._forward_decode` (the gather-then-call shim)
   + cluster 3090 validation — the remaining step to land the 3.6x in serving.
 
