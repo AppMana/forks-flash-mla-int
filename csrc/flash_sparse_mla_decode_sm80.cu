@@ -27,7 +27,7 @@ constexpr int HEAD_DIM = 512;
 constexpr int VEC = HEAD_DIM / 32;        // 16 dims/lane
 constexpr float LOG2E = 1.4426950408889634f;
 constexpr int BLOCK_H = 8;                // heads/CTA (one warp each)
-constexpr int BLOCK_N = 32;               // selected slots per tile
+constexpr int BLOCK_N = 16;               // selected slots per tile (16KB K_s -> ~100% occ)
 constexpr int NTHREADS = BLOCK_H * 32;    // 256
 
 __device__ __forceinline__ float decode_k_dim(const uint8_t *data, const uint8_t *scale, int d) {
