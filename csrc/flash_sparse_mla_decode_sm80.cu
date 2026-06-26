@@ -106,9 +106,11 @@ sparse_mla_decode_split_kernel(__grid_constant__ const Sparse_mla_decode_params 
             } else { slot_s[tid] = -1; stream_s[tid] = 0; }
         }
         __syncthreads();
-        for (int v = tid; v < BLOCK_N * HEAD_DIM; v += NTHREADS) {
-            int n = v / HEAD_DIM, d = v - n * HEAD_DIM;
-            float val = 0.f;
+        // vectorized gather: 2 dims/thread. fp8 decoded 2-at-a-time (cvt_fp8x2, one scale/pair,
+        // d even => same 64-group); RoPE is already bf16 -> direct copy (no convert).
+        for (int vp = tid; vp < BLOCK_N * (HEAD_DIM / 2); vp += NTHREADS) {
+            int n = vp / (HEAD_DIM / 2), d = (vp - n * (HEAD_DIM / 2)) * 2;
+            __nv_bfloat16 v0 = __float2bfloat16(0.f), v1 = v0;
             if (n < n_valid) {
                 int slot = slot_s[n];
                 int is_ex = stream_s[n];
@@ -119,10 +121,21 @@ sparse_mla_decode_split_kernel(__grid_constant__ const Sparse_mla_decode_params 
                 if (slot >= 0 && slot < nslots) {
                     const uint8_t *data, *scale;
                     slot_ptrs(cache, bstride, bsize, slot, data, scale);
-                    val = decode_k_dim(data, scale, d);
+                    if (d < FP8_DIM) {
+                        unsigned short raw2 = *reinterpret_cast<const unsigned short *>(data + d);
+                        __half2 h2 = __half2(__nv_cvt_fp8x2_to_halfraw2(raw2, __NV_E4M3));
+                        float sc = ldexpf(1.f, (int)scale[d / SCALE_GROUP] - 127);
+                        v0 = __float2bfloat16(__low2float(h2) * sc);
+                        v1 = __float2bfloat16(__high2float(h2) * sc);
+                    } else {
+                        const __nv_bfloat16 *rope = reinterpret_cast<const __nv_bfloat16 *>(data + FP8_DIM);
+                        v0 = rope[d - FP8_DIM];
+                        v1 = rope[d + 1 - FP8_DIM];
+                    }
                 }
             }
-            K_s[n][d] = __float2bfloat16(val);
+            K_s[n][d] = v0;
+            K_s[n][d + 1] = v1;
         }
         __syncthreads();
         if (active) {
