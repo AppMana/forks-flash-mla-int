@@ -5,6 +5,19 @@ import torch
 import flash_mla_cuda  # noqa: F401  (loads the .so -> registers torch.ops.flash_mla.*)
 
 
+def _flatten_sparse_indices(indices: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    if indices is None:
+        return None
+    if indices.dim() == 3 and indices.shape[1] == 1:
+        return indices.squeeze(1)
+    if indices.dim() != 2:
+        raise ValueError(
+            "sparse MLA indices must have shape (num_tokens, topk) or "
+            "(num_tokens, 1, topk)"
+        )
+    return indices
+
+
 def get_mla_metadata(
     cache_seqlens: torch.Tensor,
     num_heads_per_head_k: int,
@@ -167,6 +180,8 @@ def flash_sparse_mla_decode(
             "torch.ops.flash_mla.fwd_sparse_decode_mla is not built yet "
             "(Ampere sm_86 CUDA sparse-MLA decode kernel)."
         )
+    swa_indices = _flatten_sparse_indices(swa_indices)
+    extra_indices = _flatten_sparse_indices(extra_indices)
     return torch.ops.flash_mla.fwd_sparse_decode_mla(
         q,
         swa_cache,
