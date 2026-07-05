@@ -9,9 +9,10 @@ Currently released:
 - Paged kvcache with block size of 32
 - Warp-specialized SM80 kernel (`warp_spec=True`): splits 8 warps into 4 consumer (QK^T GEMM + softmax) and 4 producer (global memory loads), with all 8 warps cooperating on PV GEMM. Uses double-buffered K/V loads and raw PTX barriers for SM80 compatibility.
 - sm86 DeepSeek-V4 sparse MLA decode over fp8_ds_mla paged KV cache.
-- sm86 sparse MLA prefill entry point. This is tested for correctness, but the
-  AppMana vLLM serving fork currently uses Triton for sm86 prefill because the
-  measured gathered-bf16 Triton path is faster on RTX A5000.
+- sm86 sparse MLA prefill entry point. This is a correctness-tested alias for
+  the same direct fp8_ds_mla paged-cache kernel used by decode; the AppMana vLLM
+  serving fork currently uses Triton for sm86 prefill because the measured
+  gathered-bf16 Triton attention body is faster on RTX A5000.
 
 ## AppMana DeepSeek-V4 sm86 serving status
 
@@ -29,15 +30,42 @@ the sparse-index width from `size(1)`. The Python wrapper now normalizes
 using real CUDA fp8_ds_mla tensors reproduced the mismatch at `cos_diff=1.92e-03`
 before the wrapper fix.
 
-Local RTX A5000 timings with fp8_ds_mla cache tensors, 64 heads, top-k 512:
+Local RTX A5000 timings with fp8_ds_mla cache tensors, 64 heads, random
+selected slots, no LMCache reuse:
 
 | Case | FlashMLA | Triton | Result |
 | --- | ---: | ---: | --- |
-| Decode T=1 | 0.045 ms | 0.233 ms | FlashMLA 5.23x faster |
-| Decode T=4 | 0.142 ms | 0.225 ms | FlashMLA 1.59x faster |
-| Prefill T=64 | 1.949 ms | 0.492 ms | Triton 3.96x faster |
-| Prefill T=256 | 7.722 ms | 2.113 ms | Triton 3.65x faster |
-| Prefill T=1024 | 30.388 ms | 8.285 ms | Triton 3.67x faster |
+| Decode C4A B=1 top-k 512 | 0.074 ms | 0.255 ms | FlashMLA 3.44x faster |
+| Decode C4A B=6 top-k 512 | 0.226 ms | 0.258 ms | FlashMLA 1.14x faster |
+| Decode C128A 16k B=6 top-k 128 | 0.098 ms | 0.108 ms | FlashMLA 1.10x faster |
+| Decode C128A 200k B=6 top-k 1664 | 0.601 ms | 0.732 ms | FlashMLA 1.22x faster |
+| Prefill C4A T=256 top-k 512 | 8.170 ms | 2.506 ms | Triton 3.26x faster |
+| Prefill C4A T=2048 top-k 512 | 65.028 ms | 19.996 ms | Triton 3.25x faster |
+| Prefill C128A T=2048 top-k 512 | 65.260 ms | 20.106 ms | Triton 3.25x faster |
+
+Benchmark command:
+
+```bash
+source /home/administrator/Documents/forks-vllm-ampere/.venv/bin/activate
+CUDA_VISIBLE_DEVICES=1 python benchmarks/bench_sparse_mla_sm86_shapes.py \
+  --device 0 --warmup 10 --iters 30 --torch-iters 1 \
+  --decode-batches 1 2 4 6 --prefill-tokens 256 512 1024 2048 \
+  --max-torch-tokens 0 --max-torch-topk 0
+```
+
+Small reference run including torch oracle:
+
+```bash
+TRITON_CACHE_DIR=/tmp/triton-sm86-sparse-cache CUDA_VISIBLE_DEVICES=1 \
+  python benchmarks/bench_sparse_mla_sm86_shapes.py \
+  --device 0 --warmup 3 --iters 10 --torch-iters 1 \
+  --decode-batches 1 --prefill-tokens 64 \
+  --max-torch-tokens 64 --max-torch-topk 512
+```
+
+That run measured C4A prefill T=64 at 2.212 ms for the direct FlashMLA
+fp8_ds_mla path, 0.577 ms for Triton over already-gathered bf16 KV, and
+13.272 ms for the torch reference.
 
 Future sm86 prefill work should specialize the kernel for the `T >= 64` regime
 and compare against the gathered-bf16 Triton path before changing the serving

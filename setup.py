@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from datetime import datetime
 import subprocess
+import shutil
 
 from setuptools import setup, find_packages
 
@@ -221,7 +222,9 @@ def get_sources():
     sources = [
         "csrc/flash_api.cpp",
         "csrc/flash_api_dispatch.cu",
+        "csrc/debug_imma_sm80.cu",
         "csrc/flash_sparse_mla_decode_sm80.cu",
+        "csrc/flash_sparse_mla_prefill_staged_sm80.cu",
         "csrc/flash_fwd_mla_bf16_sm80.cu",
         "csrc/flash_fwd_mla_bf16_ws_sm80.cu",
         "csrc/flash_fwd_mla_bf16_sm90.cu",
@@ -251,7 +254,10 @@ def get_cuda_include_dirs():
     return include_dirs
 
 
-subprocess.run(["git", "submodule", "update", "--init", "csrc/cutlass"])
+if shutil.which("git"):
+    subprocess.run(["git", "submodule", "update", "--init", "csrc/cutlass"])
+elif not (Path(__file__).parent / "csrc" / "cutlass" / "include").exists():
+    raise RuntimeError("csrc/cutlass is missing and git is not available to initialize it")
 
 cc_flag = []
 cc_flag.append("-gencode")

@@ -197,7 +197,8 @@ def test_sparse_mla_prefill_parity(H, T):
 
 @pytest.mark.parametrize("H", [64])
 @pytest.mark.parametrize("T", [256])
-def test_sparse_mla_prefill_two_stream_parity(H, T):
+@pytest.mark.parametrize("use_staged_prefill", [False, True])
+def test_sparse_mla_prefill_two_stream_parity(H, T, use_staged_prefill):
     """Prefill with SWA plus compressed-cache streams.
 
     This is the shape vLLM wires for DeepSeek-V4 sparse MLA prefill: two paged
@@ -239,6 +240,114 @@ def test_sparse_mla_prefill_two_stream_parity(H, T):
         q=q, swa_cache=swa_cache, swa_indices=swa_idx, swa_lens=swa_lens,
         scale=scale, attn_sink=attn_sink,
         extra_cache=extra_cache, extra_indices=extra_idx, extra_lens=extra_lens,
+        use_staged_prefill=use_staged_prefill,
     )
     cd = cos_diff(out.float(), O_ref)
     assert cd < 8e-5, f"two-stream sparse-MLA prefill cos_diff={cd:.2e} (H={H} T={T})"
+
+
+@pytest.mark.parametrize("T", [1, 2, 4, 6])
+@pytest.mark.parametrize("extra_topk", [128, 512])
+def test_sparse_mla_decode_real_serving_shapes(T, extra_topk):
+    """Live PP=10/TP=1 decode shape: H=64, SWA block 256, compressed block 2/64.
+
+    extra_topk=512 covers C4A. extra_topk=128 covers the C128A width seen around
+    16k context. The long-context C128A rows are performance-benchmarked, not
+    fp32-oracled here, to keep the correctness test bounded.
+    """
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
+        pytest.skip("requires Ampere (capability 8.x)")
+    from flash_mla import flash_sparse_mla_decode
+
+    torch.manual_seed(10 + T + extra_topk)
+    dev = "cuda"
+    H = 64
+    swa_topk = 128
+    scale = 1.0 / math.sqrt(_HEAD_DIM)
+    swa_cache, swa_K = _build_cache(swa_topk + 64, 256, dev)
+    # C4A's compressed cache block is 64 when the attention block size is 256.
+    # C128A's compressed block is 2. Both layouts are the same byte format.
+    extra_block = 64 if extra_topk == 512 else 2
+    extra_cache, extra_K = _build_cache(extra_topk + 64, extra_block, dev)
+    swa_slots, extra_slots = swa_K.shape[0], extra_K.shape[0]
+
+    q = torch.randn(T, H, _HEAD_DIM, device=dev, dtype=torch.bfloat16)
+    swa_lens = torch.randint(max(1, swa_topk - 16), swa_topk + 1, (T,), dtype=torch.int32, device=dev)
+    extra_lens = torch.randint(max(1, extra_topk - 16), extra_topk + 1, (T,), dtype=torch.int32, device=dev)
+    swa_idx = torch.stack([torch.randperm(swa_slots, device=dev)[:swa_topk].to(torch.int32) for _ in range(T)])
+    extra_idx = torch.stack([torch.randperm(extra_slots, device=dev)[:extra_topk].to(torch.int32) for _ in range(T)])
+    attn_sink = torch.randn(H, device=dev, dtype=torch.float32) * 0.1
+
+    O_ref = torch.zeros(T, H, _HEAD_DIM, device=dev, dtype=torch.float32)
+    for t in range(T):
+        ns, ne = int(swa_lens[t]), int(extra_lens[t])
+        K = torch.cat([swa_K[swa_idx[t, :ns].long()], extra_K[extra_idx[t, :ne].long()]]).float()
+        sc = (q[t].float() @ K.t()) * scale
+        sink = attn_sink[:, None].float()
+        mx = torch.maximum(sc.max(-1, keepdim=True).values, sink)
+        ex = torch.exp(sc - mx)
+        O_ref[t] = (ex @ K) / (ex.sum(-1, keepdim=True) + torch.exp(sink - mx))
+
+    out = flash_sparse_mla_decode(
+        q=q,
+        swa_cache=swa_cache,
+        swa_indices=swa_idx,
+        swa_lens=swa_lens,
+        scale=scale,
+        attn_sink=attn_sink,
+        extra_cache=extra_cache,
+        extra_indices=extra_idx,
+        extra_lens=extra_lens,
+    )
+    cd = cos_diff(out.float(), O_ref)
+    assert cd < 8e-5, f"real serving decode cos_diff={cd:.2e} (T={T} extra_topk={extra_topk})"
+
+
+@pytest.mark.parametrize("T", [256, 512])
+def test_sparse_mla_prefill_real_serving_two_stream_shape(T):
+    """Live prefill shape with direct paged fp8 caches, not gathered bf16 KV."""
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
+        pytest.skip("requires Ampere (capability 8.x)")
+    from flash_mla import flash_sparse_mla_prefill
+
+    torch.manual_seed(20 + T)
+    dev = "cuda"
+    H = 64
+    swa_topk, extra_topk = 128, 512
+    scale = 1.0 / math.sqrt(_HEAD_DIM)
+    swa_cache, swa_K = _build_cache(swa_topk + 64, 256, dev)
+    extra_cache, extra_K = _build_cache(extra_topk + 64, 64, dev)
+    swa_slots, extra_slots = swa_K.shape[0], extra_K.shape[0]
+
+    q = torch.randn(T, H, _HEAD_DIM, device=dev, dtype=torch.bfloat16)
+    swa_lens = torch.randint(max(1, swa_topk - 16), swa_topk + 1, (T,), dtype=torch.int32, device=dev)
+    extra_lens = torch.randint(max(1, extra_topk - 32), extra_topk + 1, (T,), dtype=torch.int32, device=dev)
+    swa_idx = torch.stack([torch.randperm(swa_slots, device=dev)[:swa_topk].to(torch.int32) for _ in range(T)])
+    extra_idx = torch.stack([torch.randperm(extra_slots, device=dev)[:extra_topk].to(torch.int32) for _ in range(T)])
+    attn_sink = torch.randn(H, device=dev, dtype=torch.float32) * 0.1
+
+    sample = torch.tensor([0, T // 2, T - 1], device=dev)
+    O_ref = torch.zeros(sample.numel(), H, _HEAD_DIM, device=dev, dtype=torch.float32)
+    for out_i, t_tensor in enumerate(sample):
+        t = int(t_tensor.item())
+        ns, ne = int(swa_lens[t]), int(extra_lens[t])
+        K = torch.cat([swa_K[swa_idx[t, :ns].long()], extra_K[extra_idx[t, :ne].long()]]).float()
+        sc = (q[t].float() @ K.t()) * scale
+        sink = attn_sink[:, None].float()
+        mx = torch.maximum(sc.max(-1, keepdim=True).values, sink)
+        ex = torch.exp(sc - mx)
+        O_ref[out_i] = (ex @ K) / (ex.sum(-1, keepdim=True) + torch.exp(sink - mx))
+
+    out = flash_sparse_mla_prefill(
+        q=q,
+        swa_cache=swa_cache,
+        swa_indices=swa_idx.unsqueeze(1),
+        swa_lens=swa_lens,
+        scale=scale,
+        attn_sink=attn_sink,
+        extra_cache=extra_cache,
+        extra_indices=extra_idx,
+        extra_lens=extra_lens,
+    )
+    cd = cos_diff(out[sample].float(), O_ref)
+    assert cd < 8e-5, f"real serving prefill sampled cos_diff={cd:.2e} (T={T})"

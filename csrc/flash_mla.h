@@ -99,6 +99,38 @@ struct Sparse_mla_decode_params {
 
 void run_sparse_mla_decode(Sparse_mla_decode_params &params, cudaStream_t stream);
 
+struct Sparse_mla_prefill_staged_params {
+    int num_tokens, num_heads, width;
+    int swa_topk, swa_num_blocks, swa_block_size;
+    int extra_topk, extra_num_blocks, extra_block_size;
+    float scale_log2;
+    const void *q_ptr;                 // bf16 [T, H, 512]
+    int64_t q_token_stride, q_head_stride;
+    void *o_ptr;                       // bf16 [T, H, 512]
+    int64_t out_token_stride, out_head_stride;
+    void *kv_ptr;                      // bf16 [T, width, 512]
+    const float *attn_sink_ptr;        // [H] or nullptr
+    const void *swa_cache_ptr;         // fp8 uint8 [nb, bs, 584] or int8 [nb, bs, 512]
+    const float *swa_scale_ptr;        // int8 [nb, bs] or nullptr for fp8
+    int64_t swa_block_stride, swa_pos_stride;
+    int64_t swa_scale_block_stride, swa_scale_pos_stride;
+    const int *swa_indices_ptr;        // [T, swa_topk]
+    const int *swa_lens_ptr;           // [T]
+    const void *extra_cache_ptr;
+    const float *extra_scale_ptr;
+    int64_t extra_block_stride, extra_pos_stride;
+    int64_t extra_scale_block_stride, extra_scale_pos_stride;
+    const int *extra_indices_ptr;
+    const int *extra_lens_ptr;
+    bool int8_cache;
+};
+
+void run_sparse_mla_prefill_staged(Sparse_mla_prefill_staged_params &params,
+                                   cudaStream_t stream);
+
+void run_debug_imma_m16n8k32_s8s8(const int8_t *a, const int8_t *b,
+                                  int32_t *out, cudaStream_t stream);
+
 struct Mla_metadata_params {
     int *__restrict__ seqlens_k_ptr;
     int *__restrict__ tile_scheduler_metadata_ptr;

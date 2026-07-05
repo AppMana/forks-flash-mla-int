@@ -6,4 +6,10 @@ from .flash_mla_interface import (
     flash_mla_with_kvcache_int8,
     flash_sparse_mla_decode,
     flash_sparse_mla_prefill,
+    flash_sparse_mla_prefill_native_staged,
+)
+from .int8_sparse_mla import (
+    quantize_int8_ds_mla_rows,
+    sparse_int8_mla_decode,
+    sparse_int8_mla_prefill_native_staged,
 )
