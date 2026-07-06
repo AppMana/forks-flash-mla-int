@@ -21,7 +21,7 @@ from bench_sparse_mla_sm86_shapes import (  # noqa: E402
 from flash_mla import flash_sparse_mla_decode, flash_sparse_mla_prefill
 from flash_mla.int8_sparse_mla import (
     quantize_int8_ds_mla_rows,
-    sparse_int8_mla_decode,
+    triton_sparse_int8_mla_decode,
     sparse_int8_mla_prefill_native_staged,
 )
 from vllm.triton_utils import LOG2E, triton
@@ -369,7 +369,7 @@ def main() -> None:
         "triton_imma_bh32_bn32",
         args.prefill_tokens,
         time_us(
-            lambda: sparse_int8_mla_decode(
+            lambda: triton_sparse_int8_mla_decode(
                 q_prefill,
                 int8_swa,
                 int8_swa_scale,
@@ -593,7 +593,7 @@ def main() -> None:
         "triton_imma_bh32_bn32",
         args.decode_tokens,
         time_us(
-            lambda: sparse_int8_mla_decode(
+            lambda: triton_sparse_int8_mla_decode(
                 q_decode,
                 int8_swa,
                 int8_swa_scale,

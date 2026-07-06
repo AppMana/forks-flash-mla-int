@@ -5,7 +5,7 @@ import torch
 
 from flash_mla.int8_sparse_mla import (
     quantize_int8_ds_mla_rows,
-    sparse_int8_mla_decode,
+    triton_sparse_int8_mla_decode,
 )
 
 
@@ -75,7 +75,7 @@ def _int8_sparse_ref(q, swa_cache, swa_scale, swa_indices, swa_lens, scale, sink
 
 @pytest.mark.parametrize("has_extra", [False, True])
 @pytest.mark.parametrize("tokens", [1, 4])
-def test_sparse_int8_mla_decode_matches_int8_oracle(has_extra, tokens):
+def test_triton_sparse_int8_mla_decode_matches_int8_oracle(has_extra, tokens):
     if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
         pytest.skip("requires Ampere")
     torch.manual_seed(101 + tokens + int(has_extra))
@@ -107,7 +107,7 @@ def test_sparse_int8_mla_decode_matches_int8_oracle(has_extra, tokens):
             for _ in range(tokens)
         ])
 
-    out = sparse_int8_mla_decode(
+    out = triton_sparse_int8_mla_decode(
         q,
         swa_cache,
         swa_scale,

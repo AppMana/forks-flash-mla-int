@@ -186,7 +186,7 @@ def _sparse_int8_mla_kernel(
     )
 
 
-def sparse_int8_mla_decode(
+def triton_sparse_int8_mla_decode(
     q: torch.Tensor,
     swa_cache: torch.Tensor,
     swa_scale: torch.Tensor,
@@ -201,6 +201,12 @@ def sparse_int8_mla_decode(
     block_h: Optional[int] = None,
     block_n: Optional[int] = None,
 ) -> torch.Tensor:
+    """Python Triton int8 sparse-MLA decode.
+
+    This is not the native CUDA ``flash_mla`` sparse decode op. Keep the symbol
+    name explicit so dispatch logs and vLLM callsites do not conflate it with
+    ``torch.ops.flash_mla`` native kernels.
+    """
     if q.shape[-1] != HEAD_DIM:
         raise ValueError(f"expected q head dim {HEAD_DIM}, got {q.shape[-1]}")
     if swa_indices.dim() == 3:
@@ -283,7 +289,6 @@ def sparse_int8_mla_decode(
         num_stages=3,
     )
     return out
-
 
 def sparse_int8_mla_prefill_native_staged(
     q: torch.Tensor,
