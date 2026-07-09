@@ -477,7 +477,13 @@ mha_fwd_sparse_int8_prefill_staged_mla(
 
     torch::stable::accelerator::DeviceGuard guard(device);
     Tensor out = torch::stable::new_empty(q, {T, H, D});
-    Tensor kv = torch::stable::new_empty(q, {T, width, D});
+    // fused path: whole-cache bf16 dequant buffer; staged path: per-token gather buffer
+    int64_t total_slots = swa_cache.size(0) * swa_cache.size(1)
+        + (extra_cache.has_value()
+               ? extra_cache.value().size(0) * extra_cache.value().size(1) : (int64_t)0);
+    Tensor kv = sparse_mla_prefill_fused_enabled(true)
+        ? torch::stable::new_empty(q, {total_slots, D})
+        : torch::stable::new_empty(q, {T, width, D});
 
     Sparse_mla_prefill_staged_params p = {};
     p.num_tokens = T;

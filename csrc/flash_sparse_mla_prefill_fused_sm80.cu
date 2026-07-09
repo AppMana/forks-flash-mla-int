@@ -72,6 +72,45 @@ __global__ void dequant_cache_kernel(Sparse_mla_prefill_staged_params p, int swa
     }
 }
 
+// int8_ds_mla variant: 512 int8 payload bytes (rope dims quantized like the rest)
+// + one fp32 rowwise scale, addressed ONLY through the runtime strides in params
+// (the vLLM fork's token stride is currently 528 = 512 + 4 scale + 12 pad, but the
+// separate-tensor legacy layout with a 512 stride must keep working). Dequant is
+// bf16 = int8 * scale.
+__global__ void dequant_cache_int8_kernel(Sparse_mla_prefill_staged_params p, int swa_slots,
+                                          int total_slots) {
+    const int8_t *swa_cache = reinterpret_cast<const int8_t *>(p.swa_cache_ptr);
+    const int8_t *extra_cache = reinterpret_cast<const int8_t *>(p.extra_cache_ptr);
+    __nv_bfloat16 *kv = reinterpret_cast<__nv_bfloat16 *>(p.kv_ptr);
+    int64_t total = (int64_t)total_slots * (HEAD_DIM / 4);
+    for (int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x; i < total;
+         i += (int64_t)blockDim.x * gridDim.x) {
+        int s = (int)(i >> 7);
+        int d = ((int)i & 127) * 4;
+        bool is_ex = s >= swa_slots;
+        int local = is_ex ? s - swa_slots : s;
+        const int8_t *cache = is_ex ? extra_cache : swa_cache;
+        int64_t bstride = is_ex ? p.extra_block_stride : p.swa_block_stride;
+        int64_t pstride = is_ex ? p.extra_pos_stride : p.swa_pos_stride;
+        const float *scale_base = is_ex ? p.extra_scale_ptr : p.swa_scale_ptr;
+        int64_t sbstride = is_ex ? p.extra_scale_block_stride : p.swa_scale_block_stride;
+        int64_t spstride = is_ex ? p.extra_scale_pos_stride : p.swa_scale_pos_stride;
+        int bsize = is_ex ? p.extra_block_size : p.swa_block_size;
+        int b = local / bsize, pos = local - b * bsize;
+        const int8_t *row = cache + (int64_t)b * bstride + (int64_t)pos * pstride;
+        const float sc = scale_base[(int64_t)b * sbstride + (int64_t)pos * spstride];
+        char4 v = *reinterpret_cast<const char4 *>(row + d);
+        __nv_bfloat162 o0 = __nv_bfloat162(__float2bfloat16((float)v.x * sc),
+                                           __float2bfloat16((float)v.y * sc));
+        __nv_bfloat162 o1 = __nv_bfloat162(__float2bfloat16((float)v.z * sc),
+                                           __float2bfloat16((float)v.w * sc));
+        __nv_bfloat162 *dst =
+            reinterpret_cast<__nv_bfloat162 *>(kv + (int64_t)s * HEAD_DIM + d);
+        dst[0] = o0;
+        dst[1] = o1;
+    }
+}
+
 // ---------------- phase 2: gather-bf16 tensor-core attention ----------------
 
 constexpr int BLOCK_M = 32;   // heads per CTA (2 CTAs cover H=64)
@@ -379,7 +418,7 @@ sparse_prefill_fused_mma_kernel(__grid_constant__ const Sparse_mla_prefill_stage
 }  // namespace
 
 bool sparse_mla_prefill_fused_enabled(bool int8_cache) {
-    if (int8_cache) return false;
+    (void)int8_cache;  // both fp8_ds_mla and int8_ds_mla are handled by the fused path
     static const bool use_fused = [] {
         const char *e = getenv("FLASH_MLA_PREFILL_FUSED");
         return !(e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N'));
@@ -396,7 +435,14 @@ bool run_sparse_mla_prefill_fused_mma(Sparse_mla_prefill_staged_params &params,
         ? params.extra_num_blocks * params.extra_block_size : 0;
     const int total_slots = swa_slots + extra_slots;
 
-    {
+    if (params.int8_cache) {
+        int64_t work = (int64_t)total_slots * (HEAD_DIM / 4);
+        int threads = 256;
+        int64_t blocks64 = (work + threads - 1) / threads;
+        int blocks = blocks64 > 4096 ? 4096 : (int)blocks64;
+        dequant_cache_int8_kernel<<<blocks, threads, 0, stream>>>(params, swa_slots,
+                                                                  total_slots);
+    } else {
         int64_t work = (int64_t)total_slots * (HEAD_DIM / 2);
         int threads = 256;
         int64_t blocks64 = (work + threads - 1) / threads;
