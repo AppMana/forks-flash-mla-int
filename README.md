@@ -16,32 +16,68 @@ Currently released:
 
 ## AppMana DeepSeek-V4 sm86 serving status
 
-The serving path in `AppMana/forks-vllm-ampere` is hybrid:
+Both sparse-MLA stages now run this repository's fused tensor-core kernels
+(tag `dsv4-sm86-kernels-2026-07-09`). The legacy kernels remain callable via
+`FLASH_MLA_DECODE_FUSED=0` / `FLASH_MLA_PREFILL_FUSED=0`.
 
 | Stage | Kernel path |
 | --- | --- |
-| Decode sparse MLA | `flash_mla.flash_sparse_mla_decode` from this repository |
-| Prefill sparse MLA | vLLM gathered bf16 `sparse_attention_triton` |
+| Decode sparse MLA | `flash_mla.flash_sparse_mla_decode` (fused, heads-as-M mma) |
+| Prefill sparse MLA | `flash_mla.flash_sparse_mla_prefill` (fused, whole-cache dequant) |
 
-The direct FlashMLA prefill integration exposed a real tensor-shape bug: vLLM's
-SWA metadata is shaped `[T, 1, window]`, while this extension's C++ binding reads
-the sparse-index width from `size(1)`. The Python wrapper now normalizes
-`[T, 1, W]` sparse-index tensors to `[T, W]` before calling the op. A RED test
-using real CUDA fp8_ds_mla tensors reproduced the mismatch at `cos_diff=1.92e-03`
-before the wrapper fix.
+Both take the KV row stride as a runtime argument and accept `fp8_ds_mla` and
+`int8_ds_mla` caches (the int8 layout is 512 int8 payload + fp32 scale at byte
+offset 512 + 12B pad = a 528-byte 16-byte-aligned token stride; see
+`vllm/models/deepseek_v4/common/ops/cache_utils.py` in the vLLM fork).
 
-Local RTX A5000 timings with fp8_ds_mla cache tensors, 64 heads, random
-selected slots, no LMCache reuse:
+RTX A5000 (sm_86), **true 16k-slot caches**, T=1 decode / T=1024 prefill chunk,
+64 heads, CUDA events, min-of-3 at >=300 iters:
 
-| Case | FlashMLA | Triton | Result |
-| --- | ---: | ---: | --- |
-| Decode C4A B=1 top-k 512 | 0.074 ms | 0.255 ms | FlashMLA 3.44x faster |
-| Decode C4A B=6 top-k 512 | 0.226 ms | 0.258 ms | FlashMLA 1.14x faster |
-| Decode C128A 16k B=6 top-k 128 | 0.098 ms | 0.108 ms | FlashMLA 1.10x faster |
-| Decode C128A 200k B=6 top-k 1664 | 0.601 ms | 0.732 ms | FlashMLA 1.22x faster |
-| Prefill C4A T=256 top-k 512 | 8.170 ms | 2.506 ms | Triton 3.26x faster |
-| Prefill C4A T=2048 top-k 512 | 65.028 ms | 19.996 ms | Triton 3.25x faster |
-| Prefill C128A T=2048 top-k 512 | 65.260 ms | 20.106 ms | Triton 3.25x faster |
+| Case | fused | prior native | production Triton |
+| --- | ---: | ---: | ---: |
+| Decode top-k 512 | **22.5 us** | 47.2 us (2.10x) | 213.7 us |
+| Decode top-k 1024 | **28.2 us** | 80.6 us (2.85x) | 409.2 us |
+| Prefill width 512 (us/token) | **3.0-3.3** | 13.7 | 5.8 |
+| Prefill width 1024 (us/token) | **5.5** | 24.1 | 11.4 |
+
+Why the old "tensor cores are a dead end for low-M" conclusion was wrong: at
+T=1 the *heads* supply the M dimension, not the tokens. ncu on the old decode
+kernel showed 2.28M ALU + 2.57M FMA + 1.42M LSU and **zero HMMA** — it was
+issue-bound on software fp8->bf16 conversion. Dequantizing the selected rows
+once into a bf16 scratch and running `mma.m16n8k16` with heads as M cuts
+dynamic instructions ~50x. Prefill applies the same idea at a different
+granularity: it dequantizes the *whole cache* once (3% of the op) because every
+row is reused ~32-64x within a chunk, whereas decode dequantizes only the
+selected rows because T=1 has no reuse to amortize. Running the prefill kernel
+at T=1 costs 530 us (SM starvation) — the two are not interchangeable.
+
+### Benchmarking caveats (read before trusting a number)
+
+- **Cache footprint decides the answer.** The pre-2026-07 conclusion that
+  Triton beat native prefill 3.25x was an artifact of a 192-slot microbench
+  whose cache was L2-resident. Always bench prefill against a >=16k-slot cache
+  (`benchmarks/bench_sparse_mla_decode_16k.py` and the 16k matrix bench do
+  this). Decode is immune — its T=1 working set is `topk x 576B`, L2-resident
+  regardless of total cache size — but bench it at 16k anyway so the numbers
+  compose.
+- **A worktree can silently bench the wrong build.** The venv's editable
+  `flash_mla` resolves to the main checkout; `PYTHONPATH` must point at the
+  worktree, or a script-style run imports the other build. This invalidated one
+  measurement before it was caught.
+- **In-process fp32 oracles pollute the allocator** and inflate wall time by
+  ~10 us; call `torch.cuda.empty_cache()` after parity checks, before timing.
+- **A busy sibling GPU adds up to +7 us jitter** even on a different device.
+  Use min-of-3 at >=300 iters, and pin `CUDA_VISIBLE_DEVICES`.
+- The decode call is 3 kernels (selection-dequant, mma attention, warp-wide
+  combine); ~2.5 us of the 22.5 us is launch gap that CUDA-graph capture in
+  serving recovers.
+
+Rejected experiments (measured, not assumed): whole-cache dequant at decode
+(would exceed the entire kernel budget at T=1); occupancy-first prefill restructure
+(BM=16 + 4-way k-split reached 33% occupancy but doubled gather DRAM and ran 35%
+slower — gather redundancy, not occupancy, is the binding constraint at 6MB L2);
+ragged non-x16 split chunks (+20%); finer-than-16 decode splits (combine/oaccum
+overhead dominates).
 
 Benchmark command:
 
@@ -52,24 +88,6 @@ CUDA_VISIBLE_DEVICES=1 python benchmarks/bench_sparse_mla_sm86_shapes.py \
   --decode-batches 1 2 4 6 --prefill-tokens 256 512 1024 2048 \
   --max-torch-tokens 0 --max-torch-topk 0
 ```
-
-Small reference run including torch oracle:
-
-```bash
-TRITON_CACHE_DIR=/tmp/triton-sm86-sparse-cache CUDA_VISIBLE_DEVICES=1 \
-  python benchmarks/bench_sparse_mla_sm86_shapes.py \
-  --device 0 --warmup 3 --iters 10 --torch-iters 1 \
-  --decode-batches 1 --prefill-tokens 64 \
-  --max-torch-tokens 64 --max-torch-topk 512
-```
-
-That run measured C4A prefill T=64 at 2.212 ms for the direct FlashMLA
-fp8_ds_mla path, 0.577 ms for Triton over already-gathered bf16 KV, and
-13.272 ms for the torch reference.
-
-Future sm86 prefill work should specialize the kernel for the `T >= 64` regime
-and compare against the gathered-bf16 Triton path before changing the serving
-default.
 
 ## Quick start
 
