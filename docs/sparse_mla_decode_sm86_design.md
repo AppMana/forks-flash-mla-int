@@ -219,3 +219,33 @@ stalls/issue at 8 warps/SM. Pairwise named barriers for the k-split/row-max
 exchanges and warp-specialized producer/consumer staging are the next levers if
 another ~15-20% is ever needed; both add real complexity for gains inside the
 GPU0 measurement noise band today.
+
+## DECODE sanity check at true 16k cache footprint (2026-07-09) — NO microbench artifact
+
+The prefill rewrite invalidated an L2-resident microbench, so decode was re-measured
+at a REAL 16k-slot cache (ncu + wall clock, T=1, H=64, ctx=16384, GPU0 A5000).
+
+Wall clock (`bench_sparse_mla_16k_matrix --decode-tokens 1`, 100 iters):
+  topk=512: 43 us @ ctx 16384 vs 53 us @ ctx 1024 (compact)
+  topk=1024: 83 us @ ctx 16384 vs 79 us @ ctx 1024
+Identical within noise — the historical tiny-cache numbers (49.4/74.4 us) HOLD.
+Why decode is immune to the artifact that broke prefill: at T=1 the working set is
+topk x 576B (~0.3-0.6 MB), L2-resident regardless of total cache size; prefill's
+working set is the whole cache (~10-34 MB), which is what the tiny bench hid.
+
+ncu (sparse_mla_decode_split_kernel, profiled clocks 1.17 GHz):
+  topk=512:  DRAM 3.9%, L2 hit 89.6% (619 KB DRAM reads), L1/TEX 73%, SM 58.6%,
+             occupancy 33%; stalls: short_scoreboard 2.41, mio_throttle 1.60;
+             pipes: ALU 2.07M + FMA 2.54M + LSU 1.42M, tensor 0.
+  topk=1024: DRAM 4.2%, L2 hit 91.8%, L1/TEX 84.9%, SM 67.4%, occupancy 56%;
+             stalls: mio_throttle 3.84, short_scoreboard 2.69;
+             pipes: ALU 4.14M + FMA 5.08M + LSU 2.84M, tensor 0.
+
+VERDICT: decode is genuinely bound where the decode journey concluded — the
+ALU/FMA/LSU issue stream (software fp8 cvt + FMA dots + smem traffic) at small-T
+parallelism, not DRAM and not an L2 artifact. The per-head-block cvt redundancy
+(4x at BLOCK_H=16) exists but the prefill fix does not transfer: whole-cache
+dequant of 16k rows (~26 MB traffic ~= 40-50 us) would exceed the entire 43 us
+kernel at T=1. A selected-rows-only bf16 staging + ldmatrix decode is the only
+plausible follow-up (mio_throttle 3.84 at topk=1024 says the L1/LSU pipe is the
+ceiling there), expected O(20%) at topk=1024 — noted, not taken.
