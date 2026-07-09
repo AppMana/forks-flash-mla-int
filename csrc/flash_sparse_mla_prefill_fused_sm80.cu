@@ -83,12 +83,24 @@ constexpr int KT_HALF = 16;              // QK k-tiles per k-split half (256 dim
 constexpr int D_PER_WARP = HEAD_DIM / 4; // PV: 4 d-slices of 128
 constexpr int ROW_CHUNKS = HEAD_DIM * 2 / 16;  // 64 x 16B cp.async chunks per row
 
-__device__ __forceinline__ uint32_t pack2(__nv_bfloat16 a, __nv_bfloat16 b) {
-    return (uint32_t)(*reinterpret_cast<uint16_t *>(&a)) |
-           ((uint32_t)(*reinterpret_cast<uint16_t *>(&b)) << 16);
+__device__ __forceinline__ uint32_t smem_addr(const void *p) {
+    return (uint32_t)__cvta_generic_to_shared(p);
 }
-__device__ __forceinline__ uint32_t pack_contig(const __nv_bfloat16 *p) {
-    return *reinterpret_cast<const uint32_t *>(p);
+// x4: four 8x8 b16 matrices; lanes 0-7/8-15/16-23/24-31 supply the row addresses.
+__device__ __forceinline__ void ldsm_x4(uint32_t r[4], uint32_t addr) {
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+                 : "r"(addr));
+}
+__device__ __forceinline__ void ldsm_x2(uint32_t r[2], uint32_t addr) {
+    asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
+                 : "=r"(r[0]), "=r"(r[1])
+                 : "r"(addr));
+}
+__device__ __forceinline__ void ldsm_x4_trans(uint32_t r[4], uint32_t addr) {
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+                 : "r"(addr));
 }
 __device__ __forceinline__ void mma16816(float c[4], const uint32_t a[4], const uint32_t b[2]) {
     asm volatile(
@@ -219,19 +231,17 @@ sparse_prefill_fused_mma_kernel(__grid_constant__ const Sparse_mla_prefill_stage
             for (int c = 0; c < 2; ++c)
 #pragma unroll
                 for (int j = 0; j < 4; ++j) scc[c][j] = 0.f;
-            const __nv_bfloat16 *qbase0 = &s.q_s[wm * 16 + group][wk * 256 + tig * 2];
-            const __nv_bfloat16 *qbase1 = &s.q_s[wm * 16 + group + 8][wk * 256 + tig * 2];
-            const __nv_bfloat16 *kbase = &s.k_s[buf][wn * 8 + group][wk * 256 + tig * 2];
+            // ldmatrix addresses: A lanes 0-15 rows, 16-31 the k+8 column half;
+            // B (x2) lanes 0-7 rows at k0, 8-15 rows at k0+8.
+            const uint32_t a_addr0 =
+                smem_addr(&s.q_s[wm * 16 + (lane & 15)][wk * 256 + ((lane >> 4) << 3)]);
+            const uint32_t b_addr0 = smem_addr(
+                &s.k_s[buf][wn * 8 + (lane & 7)][wk * 256 + (((lane >> 3) & 1) << 3)]);
 #pragma unroll
             for (int k = 0; k < KT_HALF; ++k) {
-                int k0 = k * 16;
                 uint32_t a[4], b[2];
-                a[0] = pack_contig(qbase0 + k0);
-                a[1] = pack_contig(qbase1 + k0);
-                a[2] = pack_contig(qbase0 + k0 + 8);
-                a[3] = pack_contig(qbase1 + k0 + 8);
-                b[0] = pack_contig(kbase + k0);
-                b[1] = pack_contig(kbase + k0 + 8);
+                ldsm_x4(a, a_addr0 + k * 32);
+                ldsm_x2(b, b_addr0 + k * 32);
                 mma16816(scc[k & 1], a, b);
             }
 #pragma unroll
@@ -318,19 +328,17 @@ sparse_prefill_fused_mma_kernel(__grid_constant__ const Sparse_mla_prefill_stage
         }
         {
             uint32_t pa[4];
-            pa[0] = pack_contig(&s.p_s[wm * 16 + group][tig * 2]);
-            pa[1] = pack_contig(&s.p_s[wm * 16 + group + 8][tig * 2]);
-            pa[2] = pack_contig(&s.p_s[wm * 16 + group][tig * 2 + 8]);
-            pa[3] = pack_contig(&s.p_s[wm * 16 + group + 8][tig * 2 + 8]);
+            ldsm_x4(pa, smem_addr(&s.p_s[wm * 16 + (lane & 15)][(lane >> 4) << 3]));
             const int dcol0 = wd * D_PER_WARP;
-            const int sl = tig * 2;
+            // kb via ldmatrix.trans: M0/M1 = (n0-7, n8-15) at d8 block, M2/M3 at d8+1.
+            const uint32_t kb_addr0 = smem_addr(
+                &s.k_s[buf][lane & 15][dcol0 + ((lane >> 4) << 3)]);
 #pragma unroll
-            for (int d8 = 0; d8 < D_PER_WARP / 8; ++d8) {
-                int dcol = dcol0 + d8 * 8 + group;
-                uint32_t kb[2];
-                kb[0] = pack2(s.k_s[buf][sl][dcol], s.k_s[buf][sl + 1][dcol]);
-                kb[1] = pack2(s.k_s[buf][sl + 8][dcol], s.k_s[buf][sl + 9][dcol]);
+            for (int d8 = 0; d8 < D_PER_WARP / 8; d8 += 2) {
+                uint32_t kb[4];
+                ldsm_x4_trans(kb, kb_addr0 + d8 * 16);
                 mma16816(acc[d8], pa, kb);
+                mma16816(acc[d8 + 1], pa, kb + 2);
             }
         }
         __syncthreads();  // ring[buf]/p_s/qk_red consumed; next iteration may overwrite
