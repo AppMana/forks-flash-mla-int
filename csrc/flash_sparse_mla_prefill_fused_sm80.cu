@@ -129,8 +129,10 @@ sparse_prefill_fused_mma_kernel(__grid_constant__ const Sparse_mla_prefill_stage
                                 const int swa_slots, const int total_slots) {
     extern __shared__ char smem_raw[];
     Smem &s = *reinterpret_cast<Smem *>(smem_raw);
-    const int t = blockIdx.x;
-    const int hb = blockIdx.y * BLOCK_M;
+    // grid is (head_blocks, T): blockIdx.x varies fastest, so the two head-block CTAs
+    // of one token are ADJACENT in issue order and the second hits L2 for the gather
+    const int t = blockIdx.y;
+    const int hb = blockIdx.x * BLOCK_M;
     const int tid = threadIdx.x;
     const int warp = tid >> 5;
     const int lane = tid & 31;
@@ -402,7 +404,7 @@ bool run_sparse_mla_prefill_fused_mma(Sparse_mla_prefill_staged_params &params,
         dequant_cache_kernel<<<blocks, threads, 0, stream>>>(params, swa_slots, total_slots);
     }
 
-    dim3 grid(params.num_tokens, (params.num_heads + BLOCK_M - 1) / BLOCK_M);
+    dim3 grid((params.num_heads + BLOCK_M - 1) / BLOCK_M, params.num_tokens);
     int smem = (int)sizeof(Smem);
     static bool attr_set = false;
     if (!attr_set) {
