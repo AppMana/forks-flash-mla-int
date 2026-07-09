@@ -358,7 +358,17 @@ struct Smem {
     float inv_s[BLOCK_M];
 };
 
-// grid (T, head_blocks=2, num_splits); 8 warps.
+// standalone combine: one warp per (token, head), all splits merged with uint4 reads.
+// Unlike the fused last-CTA combine (which serializes 32 heads behind 2 CTAs), this
+// parallelizes the reduction across H*T warps, so the attention grid can use finer
+// splits without paying a per-split serial tail.
+__global__ void sparse_mla_combine_kernel(__grid_constant__ const Sparse_mla_decode_params p) {
+    combine_one_head_vec(p, blockIdx.y, blockIdx.x, threadIdx.x & 31);
+}
+
+// grid (T, head_blocks=2, num_splits); 8 warps. kFusedCombine: last split-CTA per
+// head block runs the combine in-kernel; else the standalone combine kernel follows.
+template <bool kFusedCombine>
 __global__ void __launch_bounds__(NTHREADS)
 sparse_mla_decode_mma_kernel(__grid_constant__ const Sparse_mla_decode_params p) {
     extern __shared__ char smem_raw[];
@@ -636,19 +646,21 @@ sparse_mla_decode_mma_kernel(__grid_constant__ const Sparse_mla_decode_params p)
     }
 
     // ---- fused combine: last split-CTA for this (t, head_block) merges all splits ----
-    __threadfence();
-    __syncthreads();
-    __shared__ bool s_last;
-    if (tid == 0) {
-        int cidx = t * (int)gridDim.y + (int)blockIdx.y;
-        s_last = (atomicAdd(&p.combine_counter_ptr[cidx], 1) == p.num_splits - 1);
-    }
-    __syncthreads();
-    if (s_last) {
+    if constexpr (kFusedCombine) {
         __threadfence();
-        for (int r = warp; r < BLOCK_M; r += NWARPS) {
-            int h = hb + r;
-            if (h < p.num_heads) combine_one_head_vec(p, t, h, lane);
+        __syncthreads();
+        __shared__ bool s_last;
+        if (tid == 0) {
+            int cidx = t * (int)gridDim.y + (int)blockIdx.y;
+            s_last = (atomicAdd(&p.combine_counter_ptr[cidx], 1) == p.num_splits - 1);
+        }
+        __syncthreads();
+        if (s_last) {
+            __threadfence();
+            for (int r = warp; r < BLOCK_M; r += NWARPS) {
+                int h = hb + r;
+                if (h < p.num_heads) combine_one_head_vec(p, t, h, lane);
+            }
         }
     }
 }
@@ -1151,11 +1163,27 @@ void run_sparse_mla_decode(Sparse_mla_decode_params &params, cudaStream_t stream
             int smem = (int)sizeof(mma_dec::Smem);
             static bool attr_set = false;
             if (!attr_set) {
-                cudaFuncSetAttribute(mma_dec::sparse_mla_decode_mma_kernel,
+                cudaFuncSetAttribute(mma_dec::sparse_mla_decode_mma_kernel<true>,
+                                     cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+                cudaFuncSetAttribute(mma_dec::sparse_mla_decode_mma_kernel<false>,
                                      cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
                 attr_set = true;
             }
-            mma_dec::sparse_mla_decode_mma_kernel<<<mgrid, mma_dec::NTHREADS, smem, stream>>>(params);
+            // standalone parallel combine by default (one warp per head, splits merged
+            // wide); FLASH_MLA_DECODE_FUSED_COMBINE=1 keeps the last-CTA in-kernel one.
+            static const bool fused_combine = [] {
+                const char *e = getenv("FLASH_MLA_DECODE_FUSED_COMBINE");
+                return e && (e[0] == '1' || e[0] == 'y' || e[0] == 'Y');
+            }();
+            if (fused_combine || params.num_splits == 1) {
+                mma_dec::sparse_mla_decode_mma_kernel<true>
+                    <<<mgrid, mma_dec::NTHREADS, smem, stream>>>(params);
+            } else {
+                mma_dec::sparse_mla_decode_mma_kernel<false>
+                    <<<mgrid, mma_dec::NTHREADS, smem, stream>>>(params);
+                dim3 cgrid(params.num_heads, params.num_tokens);
+                mma_dec::sparse_mla_combine_kernel<<<cgrid, 32, 0, stream>>>(params);
+            }
             return;
         }
         sparse_mla_decode_fused_split_kernel<<<grid, NTHREADS, 0, stream>>>(params);
