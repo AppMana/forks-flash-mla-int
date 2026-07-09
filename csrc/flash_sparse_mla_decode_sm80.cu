@@ -361,9 +361,70 @@ struct Smem {
 // standalone combine: one warp per (token, head), all splits merged with uint4 reads.
 // Unlike the fused last-CTA combine (which serializes 32 heads behind 2 CTAs), this
 // parallelizes the reduction across H*T warps, so the attention grid can use finer
-// splits without paying a per-split serial tail.
+// splits without paying a per-split serial tail. The per-split mlse rows are read
+// ONE-SPLIT-PER-LANE and shfl-broadcast (no serial two-pass scalar chain), and the
+// accumulation is branchless so the oaccum uint4 loads pipeline across iterations.
 __global__ void sparse_mla_combine_kernel(__grid_constant__ const Sparse_mla_decode_params p) {
-    combine_one_head_vec(p, blockIdx.y, blockIdx.x, threadIdx.x & 31);
+    const int t = blockIdx.y;
+    const int h = blockIdx.x;
+    const int lane = threadIdx.x & 31;
+    const int ns = p.num_splits;                 // binding caps at 64
+    const int64_t pm0 = ((int64_t)t * p.num_heads + h) * ns;
+
+    float m_r[2] = {-INFINITY, -INFINITY}, l_r[2] = {0.f, 0.f};
+#pragma unroll
+    for (int v = 0; v < 2; ++v) {
+        int sp = lane + v * 32;
+        if (sp < ns) {
+            m_r[v] = p.mlse_ptr[(pm0 + sp) * 2];
+            l_r[v] = p.mlse_ptr[(pm0 + sp) * 2 + 1];
+        }
+    }
+    const float sinkm = (p.attn_sink_ptr != nullptr) ? p.attn_sink_ptr[h] * LOG2E : -INFINITY;
+    float gm = fmaxf(m_r[0], m_r[1]);
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) gm = fmaxf(gm, __shfl_xor_sync(0xffffffffu, gm, o));
+    gm = fmaxf(gm, sinkm);
+
+    float gl = 0.f;
+#pragma unroll
+    for (int v = 0; v < 2; ++v)
+        gl += (m_r[v] == -INFINITY) ? 0.f : l_r[v] * exp2f(m_r[v] - gm);
+    gl = warp_sum(gl);
+    if (p.attn_sink_ptr != nullptr) gl += exp2f(sinkm - gm);
+
+    float cacc[VEC];
+#pragma unroll
+    for (int i = 0; i < VEC; ++i) cacc[i] = 0.f;
+    const __nv_bfloat16 *obase =
+        reinterpret_cast<const __nv_bfloat16 *>(p.oaccum_ptr) + pm0 * HEAD_DIM + lane * VEC;
+    for (int sp = 0; sp < ns; ++sp) {
+        float m_sp = __shfl_sync(0xffffffffu, m_r[sp >> 5], sp & 31);
+        float scale = (m_sp == -INFINITY) ? 0.f : exp2f(m_sp - gm);
+        const uint4 *oacc = reinterpret_cast<const uint4 *>(obase + (int64_t)sp * HEAD_DIM);
+        uint4 raw0 = oacc[0], raw1 = oacc[1];
+        const __nv_bfloat162 *b0 = reinterpret_cast<const __nv_bfloat162 *>(&raw0);
+        const __nv_bfloat162 *b1 = reinterpret_cast<const __nv_bfloat162 *>(&raw1);
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            float2 f0 = __bfloat1622float2(b0[j]);
+            float2 f1 = __bfloat1622float2(b1[j]);
+            cacc[j * 2] += f0.x * scale;
+            cacc[j * 2 + 1] += f0.y * scale;
+            cacc[8 + j * 2] += f1.x * scale;
+            cacc[8 + j * 2 + 1] += f1.y * scale;
+        }
+    }
+    float inv = 1.f / fmaxf(gl, 1e-20f);
+    __nv_bfloat16 *out_ptr = reinterpret_cast<__nv_bfloat16 *>(p.o_ptr)
+        + (int64_t)t * p.out_token_stride + (int64_t)h * p.out_head_stride + lane * VEC;
+    uint4 packed[2];
+    __nv_bfloat162 *pb = reinterpret_cast<__nv_bfloat162 *>(packed);
+#pragma unroll
+    for (int j = 0; j < VEC / 2; ++j)
+        pb[j] = __floats2bfloat162_rn(cacc[j * 2] * inv, cacc[j * 2 + 1] * inv);
+    reinterpret_cast<uint4 *>(out_ptr)[0] = packed[0];
+    reinterpret_cast<uint4 *>(out_ptr)[1] = packed[1];
 }
 
 // grid (T, head_blocks=2, num_splits); 8 warps. kFusedCombine: last split-CTA per
