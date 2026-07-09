@@ -116,7 +116,10 @@ struct Smem {
     const __nv_bfloat16 *src_row_s[2][BLOCK_N];
     __nv_bfloat16 p_s[BLOCK_M][BLOCK_N + 8]; // softmax probs (padded rows)
     float qk_red[2][2][32][4];               // k-split partial C exchange [wm][wn][lane][4]
-    float row_scratch[2][BLOCK_M];           // cross-wn row max / sum
+    // max and sum exchanges are SEPARATE buffers: the sum write happens in the same
+    // barrier interval as the other wn-warp's max read (same slots would race)
+    float row_max_s[2][BLOCK_M];             // [wn][row]
+    float row_sum_s[2][BLOCK_M];             // [wn][row]
     float resc_s[BLOCK_M];
     float inv_s[BLOCK_M];
 };
@@ -266,15 +269,15 @@ sparse_prefill_fused_mma_kernel(__grid_constant__ const Sparse_mla_prefill_stage
                 tmax1 = fmaxf(tmax1, __shfl_xor_sync(0xffffffffu, tmax1, o));
             }
             if (tig == 0) {
-                s.row_scratch[wn][r0] = tmax0;
-                s.row_scratch[wn][r1] = tmax1;
+                s.row_max_s[wn][r0] = tmax0;
+                s.row_max_s[wn][r1] = tmax1;
             }
         }
         __syncthreads();
 
         if (wk == 0) {
-            const float tile_m0 = fmaxf(s.row_scratch[0][r0], s.row_scratch[1][r0]);
-            const float tile_m1 = fmaxf(s.row_scratch[0][r1], s.row_scratch[1][r1]);
+            const float tile_m0 = fmaxf(s.row_max_s[0][r0], s.row_max_s[1][r0]);
+            const float tile_m1 = fmaxf(s.row_max_s[0][r1], s.row_max_s[1][r1]);
             const float nm0 = fmaxf(m0, tile_m0);
             const float nm1 = fmaxf(m1, tile_m1);
             const float resc0 = exp2f(m0 - nm0);
@@ -303,8 +306,8 @@ sparse_prefill_fused_mma_kernel(__grid_constant__ const Sparse_mla_prefill_stage
                 ps1 += __shfl_xor_sync(0xffffffffu, ps1, o);
             }
             if (tig == 0) {
-                s.row_scratch[wn][r0] = ps0;
-                s.row_scratch[wn][r1] = ps1;
+                s.row_sum_s[wn][r0] = ps0;
+                s.row_sum_s[wn][r1] = ps1;
             }
             l0 = l0 * resc0;
             l1 = l1 * resc1;
@@ -312,8 +315,8 @@ sparse_prefill_fused_mma_kernel(__grid_constant__ const Sparse_mla_prefill_stage
         __syncthreads();
 
         if (wk == 0) {
-            l0 += s.row_scratch[0][r0] + s.row_scratch[1][r0];
-            l1 += s.row_scratch[0][r1] + s.row_scratch[1][r1];
+            l0 += s.row_sum_s[0][r0] + s.row_sum_s[1][r0];
+            l1 += s.row_sum_s[0][r1] + s.row_sum_s[1][r1];
         }
 
         // ---- PV: warp (wm, wd) accumulates m16 x d128 (V == K, contraction n16) ----
