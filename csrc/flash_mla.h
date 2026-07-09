@@ -128,6 +128,15 @@ struct Sparse_mla_prefill_staged_params {
 void run_sparse_mla_prefill_staged(Sparse_mla_prefill_staged_params &params,
                                    cudaStream_t stream);
 
+// Fused tensor-core prefill (fp8 cache only). Returns false when the params are
+// unsupported (int8 cache) and the caller must fall back to the staged path.
+// When the fused path runs, kv_ptr is the [total_slots, 512] bf16 whole-cache
+// dequant buffer (not the [T, width, 512] staged gather buffer) -- the binding
+// sizes the workspace via sparse_mla_prefill_fused_enabled().
+bool sparse_mla_prefill_fused_enabled(bool int8_cache);
+bool run_sparse_mla_prefill_fused_mma(Sparse_mla_prefill_staged_params &params,
+                                      cudaStream_t stream);
+
 void run_debug_imma_m16n8k32_s8s8(const int8_t *a, const int8_t *b,
                                   int32_t *out, cudaStream_t stream);
 

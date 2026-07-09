@@ -813,6 +813,10 @@ sparse_prefill_stream16_mma_kernel(Sparse_mla_prefill_staged_params p) {
 
 void run_sparse_mla_prefill_staged(Sparse_mla_prefill_staged_params &params,
                                    cudaStream_t stream) {
+    // Fused tensor-core prefill (no dense-KV round trip). Default ON for the fp8
+    // cache; FLASH_MLA_PREFILL_FUSED=0 falls back to the staged two-kernel path.
+    if (run_sparse_mla_prefill_fused_mma(params, stream)) return;
+
     int total = params.num_tokens * params.width * HEAD_DIM;
     int threads = 256;
     int blocks = (total + threads - 1) / threads;
