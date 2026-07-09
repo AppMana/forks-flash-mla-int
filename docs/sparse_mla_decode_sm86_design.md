@@ -153,3 +153,69 @@ extra_lens, scale, attn_sink) -> out`.
 asserts the CUDA kernel matches (cos < 8e-5 for fp8; looser for int8). A second case cross-checks
 against `decode_sparse_attention_triton` (same inputs → same output).
 ```
+
+## PREFILL REWRITE (2026-07-09) — fused tensor-core kernel, beats production Triton 1.7-1.9x
+
+The staged prefill (`flash_sparse_mla_prefill_staged_sm80.cu`, gather-to-dense +
+smem attention) LOST to the production vLLM Triton prefill (dequant_gather +
+`sparse_attention_triton`) at REAL 16k-slot caches: 13.65 vs 5.74 us/tok at
+T=1024/width 512 (the old ~24.6 us/tok "FMA wins / gather-latency-bound at 6% BW"
+conclusion was an artifact of the 192-slot L2-resident microbench in
+`bench_sparse_mla_sm86_shapes`; at production shapes the tensor-core Triton paths
+are 2.4-5x faster than both native paths). Ground-up rewrite in
+`csrc/flash_sparse_mla_prefill_fused_sm80.cu`, exported through the same
+`flash_sparse_mla_prefill` op (env kill-switch `FLASH_MLA_PREFILL_FUSED=0`).
+
+**The two structural insights (both from ncu):**
+1. **Per-use fp8 decode is the dominant cost, not the gather or the FLOPs.** At
+   prefill every cached slot is selected ~T*topk/context (~32-64)x per chunk; the
+   software fp8->bf16 cvt chain on Ampere ran per (token, slot, head-block):
+   97M ALU + 52M FMA instructions vs 4M HMMA. Fix: **dequantize the WHOLE cache
+   once per call** into a dense bf16 [total_slots, 512] buffer (~124 us for 2x16k
+   slots = 3% of the op at T=1024), then gather bf16 rows with pure cp.async —
+   zero ALU on the load path. This alone: 8.05 -> 3.84 us/tok.
+2. **ldmatrix, not manual fragment packing.** pack_contig/pack2 fragment builds
+   (~160 LDS + PRMT per warp-tile; PV's column-wise pack2 worst) saturate the LSU
+   pipe (mio_throttle 1.94). ldmatrix x4/x2 + x4.trans (PV's n-major transpose is
+   free) cut fragment LDS ~4x: 3.84 -> 3.30 us/tok.
+
+**Kernel shape:** one CTA per (token, 32-head block), 8 warps; BLOCK_N=16 ring of
+2 filled by cp.async (16B chunks, 4/thread, slot index resolved via one
+L1-broadcast load; invalid rows STS-zeroed); QK = mma.m16n8k16, 2-way k-split so
+all 8 warps contribute (partial C exchanged through smem); PV = 2m x 4(d128) with
+V==K read from the same ring; online softmax with SEPARATE row-max and row-sum
+exchange buffers (sharing one buffer races: the sum write and the other wn-warp's
+max read share a barrier interval); attn_sink folded into (m,l) once; direct
+write. ~71KB smem, 122 regs, no spills. Grid is (head_blocks, T) so a token's two
+head-block CTAs are adjacent in issue order.
+
+**Measured (A5000, T=1024 chunk, 16k-slot caches, H=64, D=512, us/token):**
+
+| backend                          | width 512 | width 1024 |
+|----------------------------------|-----------|------------|
+| native staged (old default)      | 13.65     | 24.10      |
+| native fused FMA (num_splits==1) | 28.70     | 57.54      |
+| triton fp8 dequant+attn (PROD)   | 5.74      | 11.54      |
+| triton int8 fused IMMA           | 3.74      | 7.30       |
+| **native fused (this kernel)**   | **~3.2**  | **~6.0**   |
+
+1.7-1.9x faster than the production Triton fp8 prefill, and ahead of the int8
+IMMA Triton path despite gathering 2x the bytes. Parity 24/24 green (adversarial
+ragged lens incl. 0, off-tile lens, invalid indices inside lens, T=67, widths
+512/1024, swa-only and two-stream) at cos < 8e-5 vs the fp32 oracle.
+
+**Dead ends mapped (measured, one commit each):**
+- BLOCK_M=16 + Q-in-register-fragments + 4-way k-split + launch_bounds(256,2):
+  occupancy 16.7 -> 33% as designed, but gather DRAM doubled with 4 head-block
+  passes (242 -> 520MB reads @ T=256, 70% DRAM util) — 35% SLOWER. Gather
+  redundancy, not occupancy, is the binding constraint at 6MB L2.
+- dropping 2 barriers/tile (parity-double-buffered softmax exchanges + inline
+  resolve): flat at width 512, within noise at width 1024.
+- in-CTA fp8 decode from a raw-byte cp.async ring (v1): correct but 2.4x slower
+  than the whole-cache dequant split (the ALU redundancy above).
+
+Remaining headroom (documented, not taken): barrier ~2.5 + short-scoreboard ~2.3
+stalls/issue at 8 warps/SM. Pairwise named barriers for the k-split/row-max
+exchanges and warp-specialized producer/consumer staging are the next levers if
+another ~15-20% is ever needed; both add real complexity for gains inside the
+GPU0 measurement noise band today.
