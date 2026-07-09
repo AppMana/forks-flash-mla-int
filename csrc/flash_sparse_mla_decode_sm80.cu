@@ -253,6 +253,352 @@ sparse_mla_decode_fused_split_kernel(__grid_constant__ const Sparse_mla_decode_p
     }
 }
 
+// ===================================================================================
+// H2: heads-as-M tensor-core decode (mma_dec). The 64 q heads ARE the M dimension
+// (BLOCK_M=32 heads/CTA, 2 head-block CTAs), so m16n8k16 HMMA tiles are full even at
+// T=1. Split-KV re-parallelizes across the selection exactly like the FMA kernel;
+// K rows are clean bf16 from the H1 selection scratch (cp.async ring, ldmatrix
+// fragment loads, V==K read from the same ring). Structure ported from the fused
+// prefill kernel (csrc/flash_sparse_mla_prefill_fused_sm80.cu), whose per-CTA shape
+// at T=1 is exactly this decode shape; new here: split-KV partials + fused combine.
+namespace mma_dec {
+
+constexpr int BLOCK_M = 32;   // heads per CTA (2 CTAs cover H=64)
+constexpr int BLOCK_N = 16;   // selected slots per ring slot
+constexpr int NWARPS = 8;
+constexpr int NTHREADS = NWARPS * 32;
+constexpr int LD = HEAD_DIM + 8;         // bf16 pad: 1040B row stride dodges bank conflicts
+constexpr int KT_HALF = 16;              // QK k-tiles per k-split half (256 dims)
+constexpr int D_PER_WARP = HEAD_DIM / 4; // PV: 4 d-slices of 128
+constexpr int ROW_CHUNKS = HEAD_DIM * 2 / 16;  // 64 x 16B cp.async chunks per row
+
+__device__ __forceinline__ uint32_t smem_addr(const void *p) {
+    return (uint32_t)__cvta_generic_to_shared(p);
+}
+__device__ __forceinline__ void ldsm_x4(uint32_t r[4], uint32_t addr) {
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+                 : "r"(addr));
+}
+__device__ __forceinline__ void ldsm_x2(uint32_t r[2], uint32_t addr) {
+    asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
+                 : "=r"(r[0]), "=r"(r[1])
+                 : "r"(addr));
+}
+__device__ __forceinline__ void ldsm_x4_trans(uint32_t r[4], uint32_t addr) {
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+                 : "r"(addr));
+}
+__device__ __forceinline__ void mma16816(float c[4], const uint32_t a[4], const uint32_t b[2]) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+        : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
+}
+
+struct Smem {
+    __nv_bfloat16 q_s[BLOCK_M][LD];          // 33.3 KB
+    __nv_bfloat16 k_s[2][BLOCK_N][LD];       // 33.3 KB gather ring (cp.async lands here)
+    __nv_bfloat16 p_s[BLOCK_M][BLOCK_N + 8]; // softmax probs (padded rows)
+    float qk_red[2][2][32][4];               // k-split partial C exchange [wm][wn][lane][4]
+    float row_max_s[2][BLOCK_M];             // [wn][row] (separate from sums: see prefill)
+    float row_sum_s[2][BLOCK_M];
+    float resc_s[BLOCK_M];
+    float inv_s[BLOCK_M];
+};
+
+// grid (T, head_blocks=2, num_splits); 8 warps.
+__global__ void __launch_bounds__(NTHREADS)
+sparse_mla_decode_mma_kernel(__grid_constant__ const Sparse_mla_decode_params p) {
+    extern __shared__ char smem_raw[];
+    Smem &s = *reinterpret_cast<Smem *>(smem_raw);
+    const int t = blockIdx.x;
+    const int hb = blockIdx.y * BLOCK_M;
+    const int sp = blockIdx.z;
+    const int tid = threadIdx.x;
+    const int lane = tid & 31;
+    const int warp = tid >> 5;
+    const int wm = warp & 1;         // m16 tile
+    const int wn = (warp >> 1) & 1;  // QK n8 slice
+    const int wk = warp >> 2;        // QK k-split half
+    const int wd = warp >> 1;        // PV d128 slice (0..3)
+    const int group = lane >> 2;
+    const int tig = lane & 3;
+    const int qc = tig * 2;
+
+    // ---- load q tile ----
+    for (int e = tid; e < BLOCK_M * HEAD_DIM; e += NTHREADS) {
+        int r = e >> 9, c = e & 511;
+        int h = hb + r;
+        __nv_bfloat16 v = __float2bfloat16(0.f);
+        if (h < p.num_heads) {
+            const __nv_bfloat16 *qp = reinterpret_cast<const __nv_bfloat16 *>(p.q_ptr) +
+                (int64_t)t * p.q_token_stride + (int64_t)h * p.q_head_stride;
+            v = qp[c];
+        }
+        s.q_s[r][c] = v;
+    }
+
+    const int r0 = wm * 16 + group;
+    const int r1 = r0 + 8;
+    const int h0 = hb + r0;
+    const int h1 = hb + r1;
+    // attn_sink is folded here ONLY on the single-split direct path; the split path
+    // adds it once in the combine.
+    const bool sink = (p.num_splits == 1) && (p.attn_sink_ptr != nullptr);
+    float m0 = (sink && h0 < p.num_heads) ? p.attn_sink_ptr[h0] * LOG2E : -INFINITY;
+    float m1 = (sink && h1 < p.num_heads) ? p.attn_sink_ptr[h1] * LOG2E : -INFINITY;
+    float l0 = (sink && h0 < p.num_heads) ? 1.f : 0.f;
+    float l1 = (sink && h1 < p.num_heads) ? 1.f : 0.f;
+
+    float acc[D_PER_WARP / 8][4];
+#pragma unroll
+    for (int d = 0; d < D_PER_WARP / 8; ++d)
+#pragma unroll
+        for (int j = 0; j < 4; ++j) acc[d][j] = 0.f;
+
+    const int swa_len = p.swa_lens_ptr[t];
+    const int extra_len = (p.extra_cache_ptr != nullptr) ? p.extra_lens_ptr[t] : 0;
+    const int total = swa_len + extra_len;
+    const int chunk = (total + p.num_splits - 1) / p.num_splits;
+    const int g_start = sp * chunk;
+    const int g_end = min(g_start + chunk, total);
+    const int n_tiles = (g_end > g_start) ? (g_end - g_start + BLOCK_N - 1) / BLOCK_N : 0;
+    const __nv_bfloat16 *sel = reinterpret_cast<const __nv_bfloat16 *>(p.sel_kv_ptr)
+        + (int64_t)t * p.sel_width * HEAD_DIM;
+
+    // cp.async the tile's bf16 scratch rows into the ring (zero-fill pad rows: they
+    // enter the tile row-max as score 0, which only tightens the online rescale --
+    // their probs are masked to 0 before p_s/PV, same convention as the prefill kernel)
+    auto issue_copies = [&](int tile) {
+        const int buf = tile & 1;
+        const int base = g_start + tile * BLOCK_N;
+#pragma unroll 4
+        for (int vp = tid; vp < BLOCK_N * ROW_CHUNKS; vp += NTHREADS) {
+            int n = vp >> 6, c = (vp & 63) * 8;
+            int g = base + n;
+            if (g < g_end) {
+                __pipeline_memcpy_async(&s.k_s[buf][n][c], sel + (int64_t)g * HEAD_DIM + c, 16);
+            } else {
+                *reinterpret_cast<uint4 *>(&s.k_s[buf][n][c]) = uint4{0, 0, 0, 0};
+            }
+        }
+        __pipeline_commit();
+    };
+
+    if (n_tiles > 0) issue_copies(0);
+    __syncthreads();  // q_s ready (and ring[0] issue ordered before its wait below)
+
+    for (int i = 0; i < n_tiles; ++i) {
+        const int buf = i & 1;
+        const int n_valid = min(BLOCK_N, g_end - (g_start + i * BLOCK_N));
+        __pipeline_wait_prior(0);
+        __syncthreads();  // ring[buf] ready for all; p_s/qk_red from prev tile consumed
+        if (i + 1 < n_tiles) issue_copies(i + 1);  // overlaps all math below
+
+        // ---- QK: warp (wm, wn, wk) computes partial m16 x n8 over k half wk ----
+        float sc[4];
+        {
+            float scc[2][4];
+#pragma unroll
+            for (int c = 0; c < 2; ++c)
+#pragma unroll
+                for (int j = 0; j < 4; ++j) scc[c][j] = 0.f;
+            const uint32_t a_addr0 =
+                smem_addr(&s.q_s[wm * 16 + (lane & 15)][wk * 256 + ((lane >> 4) << 3)]);
+            const uint32_t b_addr0 = smem_addr(
+                &s.k_s[buf][wn * 8 + (lane & 7)][wk * 256 + (((lane >> 3) & 1) << 3)]);
+#pragma unroll
+            for (int k = 0; k < KT_HALF; ++k) {
+                uint32_t a[4], b[2];
+                ldsm_x4(a, a_addr0 + k * 32);
+                ldsm_x2(b, b_addr0 + k * 32);
+                mma16816(scc[k & 1], a, b);
+            }
+#pragma unroll
+            for (int j = 0; j < 4; ++j) sc[j] = scc[0][j] + scc[1][j];
+        }
+        if (wk == 1) {
+#pragma unroll
+            for (int j = 0; j < 4; ++j) s.qk_red[wm][wn][lane][j] = sc[j];
+        }
+        __syncthreads();
+
+        if (wk == 0) {
+#pragma unroll
+            for (int j = 0; j < 4; ++j)
+                sc[j] = (sc[j] + s.qk_red[wm][wn][lane][j]) * p.scale_log2;
+
+            float tmax0 = fmaxf(sc[0], sc[1]);
+            float tmax1 = fmaxf(sc[2], sc[3]);
+#pragma unroll
+            for (int o = 1; o < 4; o <<= 1) {
+                tmax0 = fmaxf(tmax0, __shfl_xor_sync(0xffffffffu, tmax0, o));
+                tmax1 = fmaxf(tmax1, __shfl_xor_sync(0xffffffffu, tmax1, o));
+            }
+            if (tig == 0) {
+                s.row_max_s[wn][r0] = tmax0;
+                s.row_max_s[wn][r1] = tmax1;
+            }
+        }
+        __syncthreads();
+
+        if (wk == 0) {
+            const float tile_m0 = fmaxf(s.row_max_s[0][r0], s.row_max_s[1][r0]);
+            const float tile_m1 = fmaxf(s.row_max_s[0][r1], s.row_max_s[1][r1]);
+            const float nm0 = fmaxf(m0, tile_m0);
+            const float nm1 = fmaxf(m1, tile_m1);
+            const float resc0 = exp2f(m0 - nm0);
+            const float resc1 = exp2f(m1 - nm1);
+            m0 = nm0;
+            m1 = nm1;
+            if (wn == 0 && tig == 0) {
+                s.resc_s[r0] = resc0;
+                s.resc_s[r1] = resc1;
+            }
+            int col = wn * 8 + qc;
+            bool v0 = col < n_valid, v1 = (col + 1) < n_valid;
+            float p00 = v0 ? exp2f(sc[0] - m0) : 0.f;
+            float p01 = v1 ? exp2f(sc[1] - m0) : 0.f;
+            float p10 = v0 ? exp2f(sc[2] - m1) : 0.f;
+            float p11 = v1 ? exp2f(sc[3] - m1) : 0.f;
+            float ps0 = p00 + p01;
+            float ps1 = p10 + p11;
+            s.p_s[r0][col] = __float2bfloat16(p00);
+            s.p_s[r0][col + 1] = __float2bfloat16(p01);
+            s.p_s[r1][col] = __float2bfloat16(p10);
+            s.p_s[r1][col + 1] = __float2bfloat16(p11);
+#pragma unroll
+            for (int o = 1; o < 4; o <<= 1) {
+                ps0 += __shfl_xor_sync(0xffffffffu, ps0, o);
+                ps1 += __shfl_xor_sync(0xffffffffu, ps1, o);
+            }
+            if (tig == 0) {
+                s.row_sum_s[wn][r0] = ps0;
+                s.row_sum_s[wn][r1] = ps1;
+            }
+            l0 = l0 * resc0;
+            l1 = l1 * resc1;
+        }
+        __syncthreads();
+
+        if (wk == 0) {
+            l0 += s.row_sum_s[0][r0] + s.row_sum_s[1][r0];
+            l1 += s.row_sum_s[0][r1] + s.row_sum_s[1][r1];
+        }
+
+        // ---- PV: warp (wm, wd) accumulates m16 x d128 (V == K, contraction n16) ----
+        const float resc0 = s.resc_s[r0];
+        const float resc1 = s.resc_s[r1];
+#pragma unroll
+        for (int d = 0; d < D_PER_WARP / 8; ++d) {
+            acc[d][0] *= resc0;
+            acc[d][1] *= resc0;
+            acc[d][2] *= resc1;
+            acc[d][3] *= resc1;
+        }
+        {
+            uint32_t pa[4];
+            ldsm_x4(pa, smem_addr(&s.p_s[wm * 16 + (lane & 15)][(lane >> 4) << 3]));
+            const int dcol0 = wd * D_PER_WARP;
+            const uint32_t kb_addr0 = smem_addr(
+                &s.k_s[buf][lane & 15][dcol0 + ((lane >> 4) << 3)]);
+#pragma unroll
+            for (int d8 = 0; d8 < D_PER_WARP / 8; d8 += 2) {
+                uint32_t kb[4];
+                ldsm_x4_trans(kb, kb_addr0 + d8 * 16);
+                mma16816(acc[d8], pa, kb);
+                mma16816(acc[d8 + 1], pa, kb + 2);
+            }
+        }
+        __syncthreads();  // ring[buf]/p_s/qk_red consumed; next iteration may overwrite
+    }
+
+    const int dcol0 = wd * D_PER_WARP;
+    if (p.num_splits == 1) {
+        // direct write (sink already folded into m/l)
+        if (wk == 0 && wn == 0 && tig == 0) {
+            s.inv_s[r0] = 1.f / fmaxf(l0, 1e-20f);
+            s.inv_s[r1] = 1.f / fmaxf(l1, 1e-20f);
+        }
+        __syncthreads();
+        const float inv0 = s.inv_s[r0];
+        const float inv1 = s.inv_s[r1];
+        __nv_bfloat16 *o0 = reinterpret_cast<__nv_bfloat16 *>(p.o_ptr) +
+            (int64_t)t * p.out_token_stride + (int64_t)h0 * p.out_head_stride;
+        __nv_bfloat16 *o1 = reinterpret_cast<__nv_bfloat16 *>(p.o_ptr) +
+            (int64_t)t * p.out_token_stride + (int64_t)h1 * p.out_head_stride;
+#pragma unroll
+        for (int d8 = 0; d8 < D_PER_WARP / 8; ++d8) {
+            int col = dcol0 + d8 * 8 + qc;
+            if (h0 < p.num_heads) {
+                o0[col] = __float2bfloat16(acc[d8][0] * inv0);
+                o0[col + 1] = __float2bfloat16(acc[d8][1] * inv0);
+            }
+            if (h1 < p.num_heads) {
+                o1[col] = __float2bfloat16(acc[d8][2] * inv1);
+                o1[col + 1] = __float2bfloat16(acc[d8][3] * inv1);
+            }
+        }
+        return;
+    }
+
+    // ---- split partials: un-normalized acc (bf16) + {m, l} per (t, h, sp) ----
+    if (h0 < p.num_heads) {
+        __nv_bfloat16 *oacc = reinterpret_cast<__nv_bfloat16 *>(p.oaccum_ptr)
+            + (((int64_t)t * p.num_heads + h0) * p.num_splits + sp) * HEAD_DIM;
+#pragma unroll
+        for (int d8 = 0; d8 < D_PER_WARP / 8; ++d8) {
+            int col = dcol0 + d8 * 8 + qc;
+            oacc[col] = __float2bfloat16(acc[d8][0]);
+            oacc[col + 1] = __float2bfloat16(acc[d8][1]);
+        }
+    }
+    if (h1 < p.num_heads) {
+        __nv_bfloat16 *oacc = reinterpret_cast<__nv_bfloat16 *>(p.oaccum_ptr)
+            + (((int64_t)t * p.num_heads + h1) * p.num_splits + sp) * HEAD_DIM;
+#pragma unroll
+        for (int d8 = 0; d8 < D_PER_WARP / 8; ++d8) {
+            int col = dcol0 + d8 * 8 + qc;
+            oacc[col] = __float2bfloat16(acc[d8][2]);
+            oacc[col + 1] = __float2bfloat16(acc[d8][3]);
+        }
+    }
+    if (wk == 0 && wn == 0 && tig == 0) {
+        if (h0 < p.num_heads) {
+            int64_t pm = ((int64_t)t * p.num_heads + h0) * p.num_splits + sp;
+            p.mlse_ptr[pm * 2] = m0;
+            p.mlse_ptr[pm * 2 + 1] = l0;
+        }
+        if (h1 < p.num_heads) {
+            int64_t pm = ((int64_t)t * p.num_heads + h1) * p.num_splits + sp;
+            p.mlse_ptr[pm * 2] = m1;
+            p.mlse_ptr[pm * 2 + 1] = l1;
+        }
+    }
+
+    // ---- fused combine: last split-CTA for this (t, head_block) merges all splits ----
+    __threadfence();
+    __syncthreads();
+    __shared__ bool s_last;
+    if (tid == 0) {
+        int cidx = t * (int)gridDim.y + (int)blockIdx.y;
+        s_last = (atomicAdd(&p.combine_counter_ptr[cidx], 1) == p.num_splits - 1);
+    }
+    __syncthreads();
+    if (s_last) {
+        __threadfence();
+        for (int r = warp; r < BLOCK_M; r += NWARPS) {
+            int h = hb + r;
+            if (h < p.num_heads) combine_one_head(p, t, h, lane);
+        }
+    }
+}
+
+}  // namespace mma_dec
+
 // ---- main kernel: grid (T, head_blocks, num_splits) -> partial (acc, m, l) per split ----
 __global__ void __launch_bounds__(NTHREADS)
 sparse_mla_decode_split_kernel(__grid_constant__ const Sparse_mla_decode_params p) {
@@ -734,6 +1080,26 @@ void run_sparse_mla_decode(Sparse_mla_decode_params &params, cudaStream_t stream
         // fused decode: selection-scratch dequant pre-pass, then bf16 attention
         dim3 dq_grid(params.sel_width, params.num_tokens);
         sparse_mla_selection_dequant_kernel<<<dq_grid, HEAD_DIM / 2, 0, stream>>>(params);
+        // heads-as-M tensor-core attention (H2); FLASH_MLA_DECODE_MMA=0 falls back to
+        // the FMA fused kernel (H1) for A/B comparison.
+        static const bool use_mma = [] {
+            const char *e = getenv("FLASH_MLA_DECODE_MMA");
+            return !(e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N'));
+        }();
+        if (use_mma) {
+            dim3 mgrid(params.num_tokens,
+                       (params.num_heads + mma_dec::BLOCK_M - 1) / mma_dec::BLOCK_M,
+                       params.num_splits);
+            int smem = (int)sizeof(mma_dec::Smem);
+            static bool attr_set = false;
+            if (!attr_set) {
+                cudaFuncSetAttribute(mma_dec::sparse_mla_decode_mma_kernel,
+                                     cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+                attr_set = true;
+            }
+            mma_dec::sparse_mla_decode_mma_kernel<<<mgrid, mma_dec::NTHREADS, smem, stream>>>(params);
+            return;
+        }
         sparse_mla_decode_fused_split_kernel<<<grid, NTHREADS, 0, stream>>>(params);
         return;
     }
