@@ -17,6 +17,7 @@
 #include <torch/headeronly/util/Exception.h>
 
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <optional>
@@ -340,9 +341,13 @@ mha_fwd_sparse_decode_mla(
     int head_blocks = (H + 15) / 16;
     int max_total = p.swa_topk + (extra_cache.has_value() ? p.extra_topk : 0);
     int num_splits = props.sm_count * 3 / (T * head_blocks > 0 ? T * head_blocks : 1);
-    // slots/split target (env-tunable for sweeps); default 32. Coarser = fewer splits =
-    // more tiles/CTA + less combine traffic; finer = more parallelism.
-    int slots_per_split = 32;
+    // slots/split target (env-tunable for sweeps). FMA kernels: 32 (the 16-warp CTAs
+    // hide latency; fine splits fill the SMs). mma decode: max(64, total/8) -> ~8 coarse
+    // splits; measured sweep (16k caches, T=1): the 8-warp mma CTA amortizes its q-load
+    // prologue + fused-combine tail over more tiles, and 8 splits beats 16 by ~16%/38%
+    // at widths 512/1024 (38.9/48.3 us vs 46.5/77.0).
+    bool decode_mma = sparse_mla_decode_fused_enabled() && sparse_mla_decode_mma_enabled();
+    int slots_per_split = decode_mma ? std::max(64, (max_total + 7) / 8) : 32;
     if (const char *e = getenv("FLASH_MLA_SLOTS_PER_SPLIT")) { int v = atoi(e); if (v > 0) slots_per_split = v; }
     int cap_by_slots = (max_total + slots_per_split - 1) / slots_per_split;
     if (cap_by_slots < 1) cap_by_slots = 1;

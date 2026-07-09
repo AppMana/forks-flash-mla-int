@@ -107,6 +107,10 @@ struct Sparse_mla_decode_params {
 // FLASH_MLA_DECODE_FUSED=0 restores the legacy in-CTA fp8-dequant kernel). The binding
 // uses this to size the scratch workspace.
 bool sparse_mla_decode_fused_enabled();
+// True when the fused decode runs the heads-as-M tensor-core kernel (default; env
+// FLASH_MLA_DECODE_MMA=0 selects the FMA fused kernel). The binding uses this to pick
+// the split policy: the 8-warp mma CTAs want ~8 coarse splits, not the FMA 32-slot ones.
+bool sparse_mla_decode_mma_enabled();
 void run_sparse_mla_decode(Sparse_mla_decode_params &params, cudaStream_t stream);
 
 struct Sparse_mla_prefill_staged_params {

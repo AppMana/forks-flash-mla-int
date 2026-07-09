@@ -1047,6 +1047,14 @@ bool sparse_mla_decode_fused_enabled() {
     return on;
 }
 
+bool sparse_mla_decode_mma_enabled() {
+    static const bool on = [] {
+        const char *e = getenv("FLASH_MLA_DECODE_MMA");
+        return !(e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N'));
+    }();
+    return on;
+}
+
 void run_sparse_mla_decode(Sparse_mla_decode_params &params, cudaStream_t stream) {
     // Prefill (num_splits==1): a batched tensor-core QK+PV kernel (mma_pf) is available but is
     // ~2x SLOWER than the FMA path here -- this workload is gather-MEMORY-LATENCY bound, not
@@ -1082,11 +1090,7 @@ void run_sparse_mla_decode(Sparse_mla_decode_params &params, cudaStream_t stream
         sparse_mla_selection_dequant_kernel<<<dq_grid, HEAD_DIM / 2, 0, stream>>>(params);
         // heads-as-M tensor-core attention (H2); FLASH_MLA_DECODE_MMA=0 falls back to
         // the FMA fused kernel (H1) for A/B comparison.
-        static const bool use_mma = [] {
-            const char *e = getenv("FLASH_MLA_DECODE_MMA");
-            return !(e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N'));
-        }();
-        if (use_mma) {
+        if (sparse_mla_decode_mma_enabled()) {
             dim3 mgrid(params.num_tokens,
                        (params.num_heads + mma_dec::BLOCK_M - 1) / mma_dec::BLOCK_M,
                        params.num_splits);
