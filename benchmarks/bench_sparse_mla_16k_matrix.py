@@ -226,6 +226,7 @@ def main() -> None:
         "--only",
         choices=[
             "prefill-fp8-native",
+            "prefill-fp8-native-fused",
             "prefill-fp8-triton-dequant",
             "prefill-fp8-triton-gathered",
             "prefill-int8-native",
@@ -295,6 +296,32 @@ def main() -> None:
                 extra_indices=pre_extra_idx,
                 extra_lens=pre_extra_lens,
                 use_staged_prefill=True,
+            ),
+            args.warmup,
+            args.iters,
+        ),
+        )
+        if args.only is not None:
+            return
+
+    if args.only in (None, "prefill-fp8-native-fused"):
+        row(
+        "prefill",
+        "fp8",
+        "native_fused",
+        args.prefill_tokens,
+        time_us(
+            lambda: flash_sparse_mla_prefill(
+                q_prefill,
+                swa_cache,
+                pre_swa_idx.unsqueeze(1),
+                pre_swa_lens,
+                scale=scale,
+                attn_sink=sink,
+                extra_cache=extra_cache,
+                extra_indices=pre_extra_idx,
+                extra_lens=pre_extra_lens,
+                use_staged_prefill=False,
             ),
             args.warmup,
             args.iters,
