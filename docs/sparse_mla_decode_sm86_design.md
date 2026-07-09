@@ -255,3 +255,58 @@ dequant of 16k rows (~26 MB traffic ~= 40-50 us) would exceed the entire 43 us
 kernel at T=1. A selected-rows-only bf16 staging + ldmatrix decode is the only
 plausible follow-up (mio_throttle 3.84 at topk=1024 says the L1/LSU pipe is the
 ceiling there), expected O(20%) at topk=1024 — noted, not taken.
+
+## DECODE REWRITE (2026-07-09) — selection-scratch + heads-as-M tensor cores, 2.1x/2.9x
+
+The split-KV FMA decode above (49.4/74.4 us on the L2-resident microbench cache) was
+re-baselined at TRUE footprint (16k-slot caches, 9.6+9.6 MB, `benchmarks/
+bench_sparse_mla_decode_16k.py`): **47.2 us @ width 512 / 80.6 us @ width 1024** — no
+microbench artifact in the totals, but ncu showed the structure differently than the
+"memory-bound" story: DRAM read is only ~512 KB (minimal) while L2 read is ~3.57 MB
+(the 4 head-block CTAs re-gather+re-dequant the SAME selection; the redundancy is
+absorbed by L2 but its fp8-cvt ALU is not: 2.28M ALU + 2.57M FMA + 1.42M LSU insts,
+0 HMMA, stalls short_scoreboard 2.30 / wait 1.62 / mio_throttle 1.52 per issue).
+
+Rewrite (same op, env kill-switches at every layer), per-commit journey at true
+footprint (us, width 512 / 1024):
+
+| step | w512 | w1024 | what |
+|------|------|-------|------|
+| baseline (FMA split-KV)        | 47.2 | 80.6 | `FLASH_MLA_DECODE_FUSED=0` |
+| H1 selection-scratch dequant   | 43.3 | 76.4 | dequant topk rows ONCE -> bf16 [T*width,512] scratch (~4.6 us pre-pass); attention reads clean rows, zero cvt ALU (`FLASH_MLA_DECODE_MMA=0` for this FMA variant) |
+| H2 heads-as-M mma_dec          | 46.9 | 77.8 | BLOCK_M=32 heads = M, m16n8k16 QK/PV, ldmatrix + cp.async ring (port of the fused prefill CTA shape) + split-KV partials; slower until retuned |
+| H3 split retune                | 39.0 | 48.4 | 8 coarse splits (fused last-CTA combine forces coarse) |
+| H4 fixed costs                 | 33.0 | 42.3 | q tile cp.async'd into ring[0]'s commit group; uint4 combine; counter memset folded into the dequant pre-pass |
+| H5 standalone parallel combine | 25.0 | 30.7 | one warp per head -> 16 fine splits viable; chunk must be a multiple of BLOCK_N=16 (sharp minima at chunk 32/64) |
+| H6 warp-wide combine           | **22.5** | **28.3** | mlse one-split-per-lane + shfl broadcast, branchless pipelined uint4 accumulation (~6.0 -> ~2.5 us) |
+
+**2.10x / 2.85x vs the production FMA baseline** (and ~9.5x / 15x vs the live Triton
+decode: 214/423 us at this footprint). Kernel split at the end (torch profiler, us):
+dequant 4.6/7.0 + mma 12.7/16.1 + combine ~2.5 + launch gaps ~2.5.
+
+Why tensor cores won this time (vs the P2 "dead end"): (1) the 64 heads ARE the M
+dimension — BLOCK_M=32 makes full m16 tiles at T=1 (the P2 attempts had M=16 heads/CTA
+but kept per-CTA gather+dequant and only head_blocks CTAs, so they starved and paid the
+cvt 4x); (2) the H1 scratch gives bf16 operands that `ldmatrix` can fragment directly;
+(3) split-KV supplies the CTA count MMA needs (num_splits=1 at T=1 measures 530 us).
+After H2-H6 the kernel executes ~100K dynamic instructions (was ~4.9M) and is pure
+latency: the remaining floor is the dequant pre-pass, per-tile ring waits/barriers, and
+3 launch gaps.
+
+Dead ends / notes:
+- calling the fused prefill kernel at T=1 without split-KV: 530 us (SM starvation).
+- ragged split chunks (not x16): +20% (whole wasted MMA tiles at every split tail).
+- benching in a worktree: the venv's editable `flash_mla` resolves to the MAIN
+  checkout — set `PYTHONPATH` to the worktree or script runs import the wrong .so.
+- torch caching-allocator pollution (e.g. an fp32 oracle in the same process) slows
+  per-op host allocations and inflates wall time ~10 us; the bench empty_cache()s
+  after its parity check.
+- GPU0 desktop/sibling load adds up to +7 us jitter on GPU1 wall times; use min-of-3
+  at >=300 iters.
+
+Env matrix: `FLASH_MLA_DECODE_FUSED=0` -> legacy in-CTA-dequant FMA kernel (bitwise
+old path, re-verified 47.0/80.2); `FLASH_MLA_DECODE_MMA=0` -> H1 scratch + FMA
+attention; `FLASH_MLA_DECODE_FUSED_COMBINE=1` -> in-kernel last-CTA combine;
+`FLASH_MLA_SLOTS_PER_SPLIT` -> split sweeps. Binding change: the fused path allocates
+a bf16 [T*width, 512] scratch (`sel_kv_ptr`/`sel_width`) only when num_splits>1, so
+large-T prefill fallbacks never allocate it.

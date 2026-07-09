@@ -154,6 +154,11 @@ def main() -> None:
             ref = fp32_ref(q, swa_K, swa_idx, swa_lens, extra_K, extra_idx, extra_lens, scale, sink)
             cd = cos_diff(out.float(), ref)
             assert cd < 8e-5, f"native decode parity FAILED at width={width}: cos={cd:.2e}"
+            del out, ref
+            # the oracle's big fp32 temporaries fragment the caching allocator; a
+            # polluted cache slows the PER-OP host allocations (out/oaccum/scratch)
+            # and can inflate launch gaps by ~10 us at this op size
+            torch.cuda.empty_cache()
 
         us = time_us(run_native, args.warmup, args.iters)
         print(f"{width},{swa_topk},{extra_topk},native,{us:.2f},{cd:.2e}", flush=True)
