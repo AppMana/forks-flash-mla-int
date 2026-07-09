@@ -246,10 +246,13 @@ def flash_sparse_mla_prefill(
     attn_sink merged once; causality is already encoded in the per-query selected indices),
     differing only in that ``q`` carries many query tokens.
 
-    On Ampere, the default prefill path stages selected fp8_ds_mla rows into a chunked
-    bf16 workspace and then runs the vLLM Triton sparse-attention kernel. This avoids
-    the native decode-oriented fused kernel's repeated fp8 dequant/gather per head
-    block. If the vLLM helpers are unavailable, it falls back to the native fused op.
+    On Ampere, the default prefill path (use_staged_prefill=True) runs the native
+    fused tensor-core kernel: the whole fp8_ds_mla cache is dequantized once into a
+    dense bf16 buffer, then a gather-bf16 mma.m16n8k16 attention kernel with a
+    cp.async ring computes the output directly (csrc/flash_sparse_mla_prefill_fused
+    _sm80.cu; FLASH_MLA_PREFILL_FUSED=0 selects the older staged two-kernel path).
+    If the native op is unavailable it falls back to a Triton-staged path, then to
+    the fused decode kernel.
 
     Arguments mirror :func:`flash_sparse_mla_decode`, with ``q`` shaped
     ``(num_query_tokens, num_heads, 512)`` and ``swa_indices``/``swa_lens`` carrying the
