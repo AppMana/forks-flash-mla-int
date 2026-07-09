@@ -79,6 +79,180 @@ __device__ __forceinline__ void combine_one_head(const Sparse_mla_decode_params 
     for (int i = 0; i < VEC; ++i) out_ptr[lane + i * 32] = __float2bfloat16(cacc[i] * inv);
 }
 
+// ---- fused-decode pre-pass: dequantize the SELECTED rows once into the dense bf16
+// selection scratch [T * sel_width, 512]. One CTA per (selected position g, token t);
+// 256 threads, one bf16 pair each. Invalid slot ids inside lens become zero rows
+// (matching the oracle: score contribution q.0 = 0, still inside the softmax).
+// This removes the per-head-block-CTA gather+fp8-decode redundancy (the attention grid
+// re-reads the same selection once per head block) and ALL conversion ALU from the
+// attention kernel's critical path.
+__global__ void sparse_mla_selection_dequant_kernel(__grid_constant__ const Sparse_mla_decode_params p) {
+    const int g = blockIdx.x;
+    const int t = blockIdx.y;
+    const int swa_len = p.swa_lens_ptr[t];
+    const int extra_len = (p.extra_cache_ptr != nullptr) ? p.extra_lens_ptr[t] : 0;
+    if (g >= swa_len + extra_len) return;
+
+    const bool is_ex = g >= swa_len;
+    const int s = is_ex ? p.extra_indices_ptr[(int64_t)t * p.extra_topk + (g - swa_len)]
+                        : p.swa_indices_ptr[(int64_t)t * p.swa_topk + g];
+    const uint8_t *cache = reinterpret_cast<const uint8_t *>(is_ex ? p.extra_cache_ptr : p.swa_cache_ptr);
+    const int64_t bstride = is_ex ? p.extra_block_stride : p.swa_block_stride;
+    const int bsize = is_ex ? p.extra_block_size : p.block_size;
+    const int nslots = (is_ex ? p.extra_num_blocks : p.swa_num_blocks) * bsize;
+
+    __nv_bfloat162 *dst = reinterpret_cast<__nv_bfloat162 *>(
+        reinterpret_cast<__nv_bfloat16 *>(p.sel_kv_ptr) + ((int64_t)t * p.sel_width + g) * HEAD_DIM);
+    const int d = threadIdx.x * 2;
+
+    if (s < 0 || s >= nslots) {
+        dst[threadIdx.x] = __nv_bfloat162(__float2bfloat16(0.f), __float2bfloat16(0.f));
+        return;
+    }
+    const uint8_t *data, *scale;
+    slot_ptrs(cache, bstride, bsize, s, data, scale);
+    __nv_bfloat16 v0, v1;
+    if (d < FP8_DIM) {
+        unsigned short raw2 = *reinterpret_cast<const unsigned short *>(data + d);
+        __half2 h2 = __half2(__nv_cvt_fp8x2_to_halfraw2(raw2, __NV_E4M3));
+        float sc = ldexpf(1.f, (int)scale[d / SCALE_GROUP] - 127);
+        v0 = __float2bfloat16(__low2float(h2) * sc);
+        v1 = __float2bfloat16(__high2float(h2) * sc);
+    } else {
+        const __nv_bfloat16 *rope = reinterpret_cast<const __nv_bfloat16 *>(data + FP8_DIM);
+        v0 = rope[d - FP8_DIM];
+        v1 = rope[d + 1 - FP8_DIM];
+    }
+    dst[threadIdx.x] = __nv_bfloat162(v0, v1);
+}
+
+// ---- fused-decode attention: identical split-KV FMA attention, but K rows are clean
+// bf16 from the selection scratch (cp.async double-buffered ring; zero conversion ALU,
+// no per-tile resolve barrier). grid (T, head_blocks, num_splits).
+__global__ void __launch_bounds__(NTHREADS)
+sparse_mla_decode_fused_split_kernel(__grid_constant__ const Sparse_mla_decode_params p) {
+    const int t = blockIdx.x;
+    const int sp = blockIdx.z;
+    const int tid = threadIdx.x;
+    const int warp = tid >> 5;
+    const int lane = tid & 31;
+    const int h = blockIdx.y * BLOCK_H + warp;
+    const bool active = h < p.num_heads;
+
+    __shared__ __nv_bfloat16 K_s[2][BLOCK_N][HEAD_DIM];
+
+    const int swa_len = p.swa_lens_ptr[t];
+    const int extra_len = (p.extra_cache_ptr != nullptr) ? p.extra_lens_ptr[t] : 0;
+    const int total = swa_len + extra_len;
+    const int chunk = (total + p.num_splits - 1) / p.num_splits;
+    const int g_start = sp * chunk;
+    const int g_end = min(g_start + chunk, total);
+
+    float q_reg[VEC];
+    if (active) {
+        const __nv_bfloat16 *q_ptr = reinterpret_cast<const __nv_bfloat16 *>(p.q_ptr)
+            + (int64_t)t * p.q_token_stride + (int64_t)h * p.q_head_stride;
+#pragma unroll
+        for (int i = 0; i < VEC; ++i) q_reg[i] = __bfloat162float(q_ptr[lane + i * 32]);
+    } else {
+#pragma unroll
+        for (int i = 0; i < VEC; ++i) q_reg[i] = 0.f;
+    }
+
+    float m = -INFINITY, l = 0.f;     // NO sink here; the combine adds it once
+    float acc[VEC];
+#pragma unroll
+    for (int i = 0; i < VEC; ++i) acc[i] = 0.f;
+
+    const __nv_bfloat16 *sel = reinterpret_cast<const __nv_bfloat16 *>(p.sel_kv_ptr)
+        + (int64_t)t * p.sel_width * HEAD_DIM;
+    const int n_tiles = (g_end > g_start) ? (g_end - g_start + BLOCK_N - 1) / BLOCK_N : 0;
+    constexpr int ROW_CHUNKS = HEAD_DIM * 2 / 16;  // 64 x 16B cp.async chunks per row
+
+    auto issue_copies = [&](int tile) {
+        const int buf = tile & 1;
+        const int base = g_start + tile * BLOCK_N;
+#pragma unroll 2
+        for (int vp = tid; vp < BLOCK_N * ROW_CHUNKS; vp += NTHREADS) {
+            int n = vp >> 6, c = (vp & 63) * 8;
+            int g = base + n;
+            if (g < g_end)
+                __pipeline_memcpy_async(&K_s[buf][n][c], sel + (int64_t)g * HEAD_DIM + c, 16);
+        }
+        __pipeline_commit();
+    };
+
+    if (n_tiles > 0) issue_copies(0);
+    for (int i = 0; i < n_tiles; ++i) {
+        const int buf = i & 1;
+        if (i + 1 < n_tiles) {
+            issue_copies(i + 1);      // ring[buf^1]: last read in i-1, fenced by its trailing barrier
+            __pipeline_wait_prior(1);
+        } else {
+            __pipeline_wait_prior(0);
+        }
+        __syncthreads();              // all threads' cp.async for tile i complete + visible
+        const int n_valid = min(BLOCK_N, g_end - (g_start + i * BLOCK_N));
+        if (active) {
+            for (int n = 0; n < n_valid; ++n) {
+                float dot = 0.f;
+#pragma unroll
+                for (int i2 = 0; i2 < VEC; ++i2) dot += q_reg[i2] * __bfloat162float(K_s[buf][n][lane + i2 * 32]);
+                float s = warp_sum(dot) * p.scale_log2;
+                float m_new = fmaxf(m, s);
+                float resc = exp2f(m - m_new);
+                float pj = exp2f(s - m_new);
+                l = l * resc + pj;
+#pragma unroll
+                for (int i2 = 0; i2 < VEC; ++i2)
+                    acc[i2] = acc[i2] * resc + pj * __bfloat162float(K_s[buf][n][lane + i2 * 32]);
+                m = m_new;
+            }
+        }
+        __syncthreads();              // everyone done reading ring[buf] before it is refilled
+    }
+
+    if (p.num_splits == 1) {
+        if (active) {
+            float gm = (p.attn_sink_ptr != nullptr) ? p.attn_sink_ptr[h] * LOG2E : -INFINITY;
+            gm = fmaxf(gm, m);
+            float gl = l * exp2f(m - gm)
+                     + ((p.attn_sink_ptr != nullptr) ? exp2f(p.attn_sink_ptr[h] * LOG2E - gm) : 0.f);
+            float sc = exp2f(m - gm) / fmaxf(gl, 1e-20f);
+            __nv_bfloat16 *out_ptr = reinterpret_cast<__nv_bfloat16 *>(p.o_ptr)
+                + (int64_t)t * p.out_token_stride + (int64_t)h * p.out_head_stride;
+#pragma unroll
+            for (int i = 0; i < VEC; ++i) out_ptr[lane + i * 32] = __float2bfloat16(acc[i] * sc);
+        }
+        return;
+    }
+
+    if (active) {
+        int64_t po = (((int64_t)t * p.num_heads + h) * p.num_splits + sp) * HEAD_DIM;
+        __nv_bfloat16 *oacc = reinterpret_cast<__nv_bfloat16 *>(p.oaccum_ptr) + po;
+#pragma unroll
+        for (int i = 0; i < VEC; ++i) oacc[lane + i * 32] = __float2bfloat16(acc[i]);
+        if (lane == 0) {
+            int64_t pm = ((int64_t)t * p.num_heads + h) * p.num_splits + sp;
+            p.mlse_ptr[pm * 2] = m;
+            p.mlse_ptr[pm * 2 + 1] = l;
+        }
+    }
+
+    __threadfence();
+    __syncthreads();
+    __shared__ bool s_last;
+    if (tid == 0) {
+        int cidx = t * (int)gridDim.y + (int)blockIdx.y;
+        s_last = (atomicAdd(&p.combine_counter_ptr[cidx], 1) == p.num_splits - 1);
+    }
+    __syncthreads();
+    if (s_last) {
+        __threadfence();
+        if (active) combine_one_head(p, t, h, lane);
+    }
+}
+
 // ---- main kernel: grid (T, head_blocks, num_splits) -> partial (acc, m, l) per split ----
 __global__ void __launch_bounds__(NTHREADS)
 sparse_mla_decode_split_kernel(__grid_constant__ const Sparse_mla_decode_params p) {
@@ -519,6 +693,14 @@ sparse_mla_prefill_mma_kernel(__grid_constant__ const Sparse_mla_decode_params p
 
 }  // namespace
 
+bool sparse_mla_decode_fused_enabled() {
+    static const bool on = [] {
+        const char *e = getenv("FLASH_MLA_DECODE_FUSED");
+        return !(e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N'));
+    }();
+    return on;
+}
+
 void run_sparse_mla_decode(Sparse_mla_decode_params &params, cudaStream_t stream) {
     // Prefill (num_splits==1): a batched tensor-core QK+PV kernel (mma_pf) is available but is
     // ~2x SLOWER than the FMA path here -- this workload is gather-MEMORY-LATENCY bound, not
@@ -548,5 +730,12 @@ void run_sparse_mla_decode(Sparse_mla_decode_params &params, cudaStream_t stream
         cudaMemsetAsync(params.combine_counter_ptr, 0,
                         (size_t)params.num_tokens * head_blocks * sizeof(int), stream);
     dim3 grid(params.num_tokens, head_blocks, params.num_splits);
+    if (params.sel_kv_ptr != nullptr && params.sel_width > 0) {
+        // fused decode: selection-scratch dequant pre-pass, then bf16 attention
+        dim3 dq_grid(params.sel_width, params.num_tokens);
+        sparse_mla_selection_dequant_kernel<<<dq_grid, HEAD_DIM / 2, 0, stream>>>(params);
+        sparse_mla_decode_fused_split_kernel<<<grid, NTHREADS, 0, stream>>>(params);
+        return;
+    }
     sparse_mla_decode_split_kernel<<<grid, NTHREADS, 0, stream>>>(params);
 }

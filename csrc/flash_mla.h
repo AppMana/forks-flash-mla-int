@@ -95,8 +95,18 @@ struct Sparse_mla_decode_params {
     float *mlse_ptr;     // [T, H, num_splits, 2]   {running max m, denom l} per split
     int *combine_counter_ptr;  // [T * head_blocks] int, zeroed; last split-CTA per (t,hb) runs combine
     int num_splits;
+    // fused decode (selection-scratch): a pre-pass dequantizes the SELECTED rows once into
+    // this dense bf16 [T * sel_width, 512] scratch (sel_width = swa_topk + extra_topk); the
+    // attention CTAs then read clean bf16 rows (no per-CTA fp8 decode, no 4x head-block
+    // redundancy). nullptr on the legacy in-CTA-dequant path.
+    void *sel_kv_ptr;
+    int sel_width;
 };
 
+// True when the selection-scratch fused decode path is enabled (env kill-switch
+// FLASH_MLA_DECODE_FUSED=0 restores the legacy in-CTA fp8-dequant kernel). The binding
+// uses this to size the scratch workspace.
+bool sparse_mla_decode_fused_enabled();
 void run_sparse_mla_decode(Sparse_mla_decode_params &params, cudaStream_t stream);
 
 struct Sparse_mla_prefill_staged_params {

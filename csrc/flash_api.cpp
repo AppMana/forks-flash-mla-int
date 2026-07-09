@@ -361,6 +361,14 @@ mha_fwd_sparse_decode_mla(
     p.mlse_ptr = reinterpret_cast<float *>(mlse.data_ptr());
     p.combine_counter_ptr = reinterpret_cast<int *>(counter.data_ptr());
 
+    // fused decode (selection-scratch): dequantize the selected rows once into a dense bf16
+    // scratch [T * max_total, 512]; small in the decode regime (num_splits>1 implies small T).
+    // FLASH_MLA_DECODE_FUSED=0 restores the legacy in-CTA-dequant kernel.
+    bool fused = split && sparse_mla_decode_fused_enabled();
+    Tensor sel_kv = torch::stable::new_empty(q, {fused ? (int64_t)T * max_total : 1, D});
+    p.sel_kv_ptr = fused ? sel_kv.data_ptr() : nullptr;
+    p.sel_width = max_total;
+
     cudaStream_t stream = current_cuda_stream(device);
     run_sparse_mla_decode(p, stream);
     return out;
