@@ -79,6 +79,48 @@ __device__ __forceinline__ void combine_one_head(const Sparse_mla_decode_params 
     for (int i = 0; i < VEC; ++i) out_ptr[lane + i * 32] = __float2bfloat16(cacc[i] * inv);
 }
 
+// vectorized combine (mma path): lane owns dims [lane*16, lane*16+16) -> the per-split
+// oaccum row is read as 2x uint4 (16 bf16) instead of 16 strided scalar loads. The
+// combine runs in ONE last CTA per head block and its load chain is a real tail cost
+// at coarse splits; 8x fewer LSU ops cut it proportionally.
+__device__ __forceinline__ void combine_one_head_vec(const Sparse_mla_decode_params &p, int t, int h, int lane) {
+    const int64_t pm0 = ((int64_t)t * p.num_heads + h) * p.num_splits;
+    float gm = (p.attn_sink_ptr != nullptr) ? p.attn_sink_ptr[h] * LOG2E : -INFINITY;
+    for (int sp = 0; sp < p.num_splits; ++sp) gm = fmaxf(gm, p.mlse_ptr[(pm0 + sp) * 2]);
+    float gl = (p.attn_sink_ptr != nullptr) ? exp2f(p.attn_sink_ptr[h] * LOG2E - gm) : 0.f;
+    float cacc[VEC];
+#pragma unroll
+    for (int i = 0; i < VEC; ++i) cacc[i] = 0.f;
+    for (int sp = 0; sp < p.num_splits; ++sp) {
+        float scale = exp2f(p.mlse_ptr[(pm0 + sp) * 2] - gm);
+        if (scale == 0.f) continue;
+        gl += p.mlse_ptr[(pm0 + sp) * 2 + 1] * scale;
+        const uint4 *oacc = reinterpret_cast<const uint4 *>(
+            reinterpret_cast<const __nv_bfloat16 *>(p.oaccum_ptr) + (pm0 + sp) * HEAD_DIM + lane * VEC);
+#pragma unroll
+        for (int v = 0; v < 2; ++v) {
+            uint4 raw = oacc[v];
+            const __nv_bfloat162 *b2 = reinterpret_cast<const __nv_bfloat162 *>(&raw);
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                float2 f = __bfloat1622float2(b2[j]);
+                cacc[v * 8 + j * 2] += f.x * scale;
+                cacc[v * 8 + j * 2 + 1] += f.y * scale;
+            }
+        }
+    }
+    float inv = 1.f / fmaxf(gl, 1e-20f);
+    __nv_bfloat16 *out_ptr = reinterpret_cast<__nv_bfloat16 *>(p.o_ptr)
+        + (int64_t)t * p.out_token_stride + (int64_t)h * p.out_head_stride + lane * VEC;
+    uint4 packed[2];
+    __nv_bfloat162 *pb = reinterpret_cast<__nv_bfloat162 *>(packed);
+#pragma unroll
+    for (int j = 0; j < VEC / 2; ++j)
+        pb[j] = __floats2bfloat162_rn(cacc[j * 2] * inv, cacc[j * 2 + 1] * inv);
+    reinterpret_cast<uint4 *>(out_ptr)[0] = packed[0];
+    reinterpret_cast<uint4 *>(out_ptr)[1] = packed[1];
+}
+
 // ---- fused-decode pre-pass: dequantize the SELECTED rows once into the dense bf16
 // selection scratch [T * sel_width, 512]. One CTA per (selected position g, token t);
 // 256 threads, one bf16 pair each. Invalid slot ids inside lens become zero rows
@@ -89,6 +131,13 @@ __device__ __forceinline__ void combine_one_head(const Sparse_mla_decode_params 
 __global__ void sparse_mla_selection_dequant_kernel(__grid_constant__ const Sparse_mla_decode_params p) {
     const int g = blockIdx.x;
     const int t = blockIdx.y;
+    // fold the combine-counter zeroing into this pre-pass (saves the memset launch);
+    // the attention kernel only starts after this kernel completes (same stream).
+    if (g == 0 && t == 0 && p.num_splits > 1) {
+        const int head_blocks = (p.num_heads + BLOCK_H - 1) / BLOCK_H;
+        for (int i = threadIdx.x; i < p.num_tokens * head_blocks; i += blockDim.x)
+            p.combine_counter_ptr[i] = 0;
+    }
     const int swa_len = p.swa_lens_ptr[t];
     const int extra_len = (p.extra_cache_ptr != nullptr) ? p.extra_lens_ptr[t] : 0;
     if (g >= swa_len + extra_len) return;
@@ -328,17 +377,19 @@ sparse_mla_decode_mma_kernel(__grid_constant__ const Sparse_mla_decode_params p)
     const int tig = lane & 3;
     const int qc = tig * 2;
 
-    // ---- load q tile ----
-    for (int e = tid; e < BLOCK_M * HEAD_DIM; e += NTHREADS) {
-        int r = e >> 9, c = e & 511;
+    // ---- q tile via cp.async: joins ring[0]'s commit group below, so the 33KB q load
+    // is DMA overlapped with the first gather instead of a serial warp-load prologue
+    // (the q prologue was the dominant per-CTA fixed cost at 8 coarse splits) ----
+    for (int vp = tid; vp < BLOCK_M * ROW_CHUNKS; vp += NTHREADS) {
+        int r = vp >> 6, c = (vp & 63) * 8;
         int h = hb + r;
-        __nv_bfloat16 v = __float2bfloat16(0.f);
         if (h < p.num_heads) {
             const __nv_bfloat16 *qp = reinterpret_cast<const __nv_bfloat16 *>(p.q_ptr) +
                 (int64_t)t * p.q_token_stride + (int64_t)h * p.q_head_stride;
-            v = qp[c];
+            __pipeline_memcpy_async(&s.q_s[r][c], qp + c, 16);
+        } else {
+            *reinterpret_cast<uint4 *>(&s.q_s[r][c]) = uint4{0, 0, 0, 0};
         }
-        s.q_s[r][c] = v;
     }
 
     const int r0 = wm * 16 + group;
@@ -388,8 +439,13 @@ sparse_mla_decode_mma_kernel(__grid_constant__ const Sparse_mla_decode_params p)
         __pipeline_commit();
     };
 
-    if (n_tiles > 0) issue_copies(0);
-    __syncthreads();  // q_s ready (and ring[0] issue ordered before its wait below)
+    if (n_tiles > 0) {
+        issue_copies(0);  // q's cp.async chunks join this commit group
+    } else {
+        __pipeline_commit();  // drain the q chunks (q_s unused on this path)
+        __pipeline_wait_prior(0);
+    }
+    __syncthreads();
 
     for (int i = 0; i < n_tiles; ++i) {
         const int buf = i & 1;
@@ -592,7 +648,7 @@ sparse_mla_decode_mma_kernel(__grid_constant__ const Sparse_mla_decode_params p)
         __threadfence();
         for (int r = warp; r < BLOCK_M; r += NWARPS) {
             int h = hb + r;
-            if (h < p.num_heads) combine_one_head(p, t, h, lane);
+            if (h < p.num_heads) combine_one_head_vec(p, t, h, lane);
         }
     }
 }
@@ -1080,12 +1136,10 @@ void run_sparse_mla_decode(Sparse_mla_decode_params &params, cudaStream_t stream
     }
 
     int head_blocks = (params.num_heads + BLOCK_H - 1) / BLOCK_H;
-    if (params.num_splits > 1)  // num_splits==1 fast path writes output directly, no counter/combine
-        cudaMemsetAsync(params.combine_counter_ptr, 0,
-                        (size_t)params.num_tokens * head_blocks * sizeof(int), stream);
     dim3 grid(params.num_tokens, head_blocks, params.num_splits);
     if (params.sel_kv_ptr != nullptr && params.sel_width > 0) {
-        // fused decode: selection-scratch dequant pre-pass, then bf16 attention
+        // fused decode: selection-scratch dequant pre-pass, then bf16 attention. The
+        // pre-pass also zeroes the combine counters (no separate memset launch).
         dim3 dq_grid(params.sel_width, params.num_tokens);
         sparse_mla_selection_dequant_kernel<<<dq_grid, HEAD_DIM / 2, 0, stream>>>(params);
         // heads-as-M tensor-core attention (H2); FLASH_MLA_DECODE_MMA=0 falls back to
@@ -1107,5 +1161,8 @@ void run_sparse_mla_decode(Sparse_mla_decode_params &params, cudaStream_t stream
         sparse_mla_decode_fused_split_kernel<<<grid, NTHREADS, 0, stream>>>(params);
         return;
     }
+    if (params.num_splits > 1)  // num_splits==1 fast path writes output directly, no counter/combine
+        cudaMemsetAsync(params.combine_counter_ptr, 0,
+                        (size_t)params.num_tokens * head_blocks * sizeof(int), stream);
     sparse_mla_decode_split_kernel<<<grid, NTHREADS, 0, stream>>>(params);
 }
