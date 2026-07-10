@@ -17,8 +17,23 @@ Currently released:
 ## AppMana DeepSeek-V4 sm86 serving status
 
 Both sparse-MLA stages now run this repository's fused tensor-core kernels
-(tag `dsv4-sm86-kernels-2026-07-09`). The legacy kernels remain callable via
-`FLASH_MLA_DECODE_FUSED=0` / `FLASH_MLA_PREFILL_FUSED=0`.
+(tag `dsv4-sm86-kernels-2026-07-09`). The legacy **decode** kernel remains callable
+via `FLASH_MLA_DECODE_FUSED=0` as an A/B reference (it is not broken). The legacy
+**prefill** staged kernel was **removed** (`csrc/flash_sparse_mla_prefill_staged_sm80.cu`,
+the `FLASH_MLA_PREFILL_FUSED=0` kill-switch, and the `use_staged_prefill` /
+`staged_chunk_tokens` wrapper kwargs are all gone).
+
+**Why the staged prefill was removed (do not resurrect it).** It was reported to
+abort at runtime on torch 2.11 via a stable-ABI `torch_call_dispatcher "aten::new_empty"`
+failure, and the fused kernel had already replaced it as the default and is
+substantially faster (1.8-2.1x in the shipped README table; ~4x measured head-to-head
+at the true 16k footprint: fused 5.3 ms vs staged 22.2 ms at T=1024/width 1024,
+9.9 ms vs 44.8 ms at width 2048). No production caller reached it (the vLLM fork
+calls `flash_sparse_mla_prefill` without `use_staged_prefill`, so it always got fused),
+so it was dead code. The fused kernel handles BOTH `fp8_ds_mla` and `int8_ds_mla`
+caches — int8 does not depend on any staged fallback. (Note: the exact torch-2.11
+abort could not be reproduced on 2.11.0+cu130 in this checkout; the staged path ran
+but ~4x slower. The removal stands on the dead-code + performance grounds regardless.)
 
 | Stage | Kernel path |
 | --- | --- |

@@ -34,7 +34,7 @@ constexpr float LOG2E = 1.4426950408889634f;
 
 // ---------------- phase 1: whole-cache fp8 -> bf16 dequant ----------------
 
-__global__ void dequant_cache_kernel(Sparse_mla_prefill_staged_params p, int swa_slots,
+__global__ void dequant_cache_kernel(Sparse_mla_prefill_params p, int swa_slots,
                                      int total_slots) {
     const uint8_t *swa_cache = reinterpret_cast<const uint8_t *>(p.swa_cache_ptr);
     const uint8_t *extra_cache = reinterpret_cast<const uint8_t *>(p.extra_cache_ptr);
@@ -77,7 +77,7 @@ __global__ void dequant_cache_kernel(Sparse_mla_prefill_staged_params p, int swa
 // (the vLLM fork's token stride is currently 528 = 512 + 4 scale + 12 pad, but the
 // separate-tensor legacy layout with a 512 stride must keep working). Dequant is
 // bf16 = int8 * scale.
-__global__ void dequant_cache_int8_kernel(Sparse_mla_prefill_staged_params p, int swa_slots,
+__global__ void dequant_cache_int8_kernel(Sparse_mla_prefill_params p, int swa_slots,
                                           int total_slots) {
     const int8_t *swa_cache = reinterpret_cast<const int8_t *>(p.swa_cache_ptr);
     const int8_t *extra_cache = reinterpret_cast<const int8_t *>(p.extra_cache_ptr);
@@ -164,7 +164,7 @@ struct Smem {
 };
 
 __global__ void __launch_bounds__(NTHREADS)
-sparse_prefill_fused_mma_kernel(__grid_constant__ const Sparse_mla_prefill_staged_params p,
+sparse_prefill_fused_mma_kernel(__grid_constant__ const Sparse_mla_prefill_params p,
                                 const int swa_slots, const int total_slots) {
     extern __shared__ char smem_raw[];
     Smem &s = *reinterpret_cast<Smem *>(smem_raw);
@@ -417,19 +417,13 @@ sparse_prefill_fused_mma_kernel(__grid_constant__ const Sparse_mla_prefill_stage
 
 }  // namespace
 
-bool sparse_mla_prefill_fused_enabled(bool int8_cache) {
-    (void)int8_cache;  // both fp8_ds_mla and int8_ds_mla are handled by the fused path
-    static const bool use_fused = [] {
-        const char *e = getenv("FLASH_MLA_PREFILL_FUSED");
-        return !(e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N'));
-    }();
-    return use_fused;
-}
-
-bool run_sparse_mla_prefill_fused_mma(Sparse_mla_prefill_staged_params &params,
-                                      cudaStream_t stream) {
-    if (!sparse_mla_prefill_fused_enabled(params.int8_cache)) return false;
-
+// Fused tensor-core prefill: dequantize the whole selected cache once into a dense
+// bf16 [total_slots, 512] buffer, then run a gather-bf16 mma.m16n8k16 attention
+// kernel. Handles both fp8_ds_mla and int8_ds_mla caches. This is the only sparse
+// prefill path -- the legacy staged two-kernel gather path was removed (dead code,
+// unreachable in production, ~4x slower at the true 16k footprint).
+void run_sparse_mla_prefill(Sparse_mla_prefill_params &params,
+                            cudaStream_t stream) {
     const int swa_slots = params.swa_num_blocks * params.swa_block_size;
     const int extra_slots = (params.extra_cache_ptr != nullptr)
         ? params.extra_num_blocks * params.extra_block_size : 0;
@@ -460,5 +454,4 @@ bool run_sparse_mla_prefill_fused_mma(Sparse_mla_prefill_staged_params &params,
     }
     sparse_prefill_fused_mma_kernel<<<grid, NTHREADS, smem, stream>>>(params, swa_slots,
                                                                       total_slots);
-    return true;
 }

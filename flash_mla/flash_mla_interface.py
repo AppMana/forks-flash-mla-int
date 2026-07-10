@@ -195,38 +195,6 @@ def flash_sparse_mla_decode(
     )
 
 
-def flash_sparse_mla_prefill_native_staged(
-    q: torch.Tensor,
-    swa_cache: torch.Tensor,
-    swa_indices: torch.Tensor,
-    swa_lens: torch.Tensor,
-    scale: Optional[float] = None,
-    attn_sink: Optional[torch.Tensor] = None,
-    extra_cache: Optional[torch.Tensor] = None,
-    extra_indices: Optional[torch.Tensor] = None,
-    extra_lens: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    if scale is None:
-        scale = q.shape[-1] ** (-0.5)
-    if not hasattr(torch.ops.flash_mla, "fwd_sparse_prefill_staged_mla"):
-        raise NotImplementedError(
-            "torch.ops.flash_mla.fwd_sparse_prefill_staged_mla is not built yet"
-        )
-    swa_indices = _flatten_sparse_indices(swa_indices)
-    extra_indices = _flatten_sparse_indices(extra_indices)
-    return torch.ops.flash_mla.fwd_sparse_prefill_staged_mla(
-        q,
-        swa_cache,
-        swa_indices,
-        swa_lens,
-        float(scale),
-        attn_sink,
-        extra_cache,
-        extra_indices,
-        extra_lens,
-    )
-
-
 def flash_sparse_mla_prefill(
     q: torch.Tensor,
     swa_cache: torch.Tensor,
@@ -237,8 +205,6 @@ def flash_sparse_mla_prefill(
     extra_cache: Optional[torch.Tensor] = None,
     extra_indices: Optional[torch.Tensor] = None,
     extra_lens: Optional[torch.Tensor] = None,
-    use_staged_prefill: Optional[bool] = None,
-    staged_chunk_tokens: int = 256,
 ) -> torch.Tensor:
     """Ampere (sm_86) CUDA sparse-MLA prefill (DeepSeek-V4-Flash absorbed form).
 
@@ -246,144 +212,34 @@ def flash_sparse_mla_prefill(
     attn_sink merged once; causality is already encoded in the per-query selected indices),
     differing only in that ``q`` carries many query tokens.
 
-    On Ampere, the default prefill path (use_staged_prefill=True) runs the native
-    fused tensor-core kernel: the whole fp8_ds_mla cache is dequantized once into a
-    dense bf16 buffer, then a gather-bf16 mma.m16n8k16 attention kernel with a
-    cp.async ring computes the output directly (csrc/flash_sparse_mla_prefill_fused
-    _sm80.cu; FLASH_MLA_PREFILL_FUSED=0 selects the older staged two-kernel path).
-    If the native op is unavailable it falls back to a Triton-staged path, then to
-    the fused decode kernel.
+    On Ampere this runs the native fused tensor-core kernel: the whole fp8_ds_mla cache
+    is dequantized once into a dense bf16 buffer, then a gather-bf16 mma.m16n8k16
+    attention kernel with a cp.async ring computes the output directly
+    (csrc/flash_sparse_mla_prefill_fused_sm80.cu). The legacy staged two-kernel gather
+    path and its ``FLASH_MLA_PREFILL_FUSED`` kill-switch were removed: the fused kernel
+    is the sole path (unreachable-by-production dead code, ~4x slower at the true 16k
+    footprint; see README).
 
     Arguments mirror :func:`flash_sparse_mla_decode`, with ``q`` shaped
     ``(num_query_tokens, num_heads, 512)`` and ``swa_indices``/``swa_lens`` carrying the
     per-query-token selection. Returns ``(num_query_tokens, num_heads, 512)`` bfloat16.
     """
-    if use_staged_prefill is None:
-        use_staged_prefill = True
-    if use_staged_prefill:
-        try:
-            return flash_sparse_mla_prefill_native_staged(
-                q=q,
-                swa_cache=swa_cache,
-                swa_indices=swa_indices,
-                swa_lens=swa_lens,
-                scale=scale,
-                attn_sink=attn_sink,
-                extra_cache=extra_cache,
-                extra_indices=extra_indices,
-                extra_lens=extra_lens,
-            )
-        except NotImplementedError:
-            pass
-        out = _flash_sparse_mla_prefill_staged(
-            q=q,
-            swa_cache=swa_cache,
-            swa_indices=swa_indices,
-            swa_lens=swa_lens,
-            scale=scale,
-            attn_sink=attn_sink,
-            extra_cache=extra_cache,
-            extra_indices=extra_indices,
-            extra_lens=extra_lens,
-            chunk_tokens=staged_chunk_tokens,
-        )
-        if out is not None:
-            return out
-
-    return flash_sparse_mla_decode(
-        q=q,
-        swa_cache=swa_cache,
-        swa_indices=swa_indices,
-        swa_lens=swa_lens,
-        scale=scale,
-        attn_sink=attn_sink,
-        extra_cache=extra_cache,
-        extra_indices=extra_indices,
-        extra_lens=extra_lens,
-    )
-
-
-def _flash_sparse_mla_prefill_staged(
-    q: torch.Tensor,
-    swa_cache: torch.Tensor,
-    swa_indices: torch.Tensor,
-    swa_lens: torch.Tensor,
-    scale: Optional[float],
-    attn_sink: Optional[torch.Tensor],
-    extra_cache: Optional[torch.Tensor],
-    extra_indices: Optional[torch.Tensor],
-    extra_lens: Optional[torch.Tensor],
-    chunk_tokens: int,
-) -> Optional[torch.Tensor]:
-    if not q.is_cuda:
-        return None
-    if q.dtype != torch.bfloat16 or q.shape[-1] != 512:
-        return None
     if scale is None:
         scale = q.shape[-1] ** (-0.5)
-    try:
-        from vllm.models.deepseek_v4.common.ops.cache_utils import (
-            dequantize_global_slots_k_cache,
+    if not hasattr(torch.ops.flash_mla, "fwd_sparse_prefill_mla"):
+        raise NotImplementedError(
+            "torch.ops.flash_mla.fwd_sparse_prefill_mla is not built yet"
         )
-        from vllm.models.deepseek_v4.nvidia_sm86.triton_kernels import (
-            sparse_attention_triton,
-        )
-    except Exception:
-        return None
-
     swa_indices = _flatten_sparse_indices(swa_indices)
     extra_indices = _flatten_sparse_indices(extra_indices)
-    if swa_indices is None:
-        return None
-    if chunk_tokens <= 0:
-        raise ValueError("staged_chunk_tokens must be positive")
-
-    tokens, _, head_dim = q.shape
-    swa_topk = swa_indices.shape[-1]
-    has_extra = extra_cache is not None and extra_indices is not None and extra_lens is not None
-    extra_topk = extra_indices.shape[-1] if has_extra else 0
-    width = swa_topk + extra_topk
-    out = torch.empty_like(q)
-
-    for start in range(0, tokens, chunk_tokens):
-        end = min(start + chunk_tokens, tokens)
-        chunk = end - start
-        kv = torch.empty(chunk, width, head_dim, dtype=torch.bfloat16, device=q.device)
-        dequantize_global_slots_k_cache(
-            kv[:, :swa_topk],
-            swa_cache,
-            swa_indices[start:end],
-            swa_cache.shape[1],
-        )
-        if has_extra:
-            assert extra_indices is not None and extra_lens is not None and extra_cache is not None
-            dequantize_global_slots_k_cache(
-                kv[:, swa_topk:],
-                extra_cache,
-                extra_indices[start:end],
-                extra_cache.shape[1],
-            )
-            lengths = swa_lens[start:end] + extra_lens[start:end]
-        else:
-            lengths = swa_lens[start:end]
-
-        row_base = torch.arange(chunk, device=q.device, dtype=torch.int32)[:, None] * width
-        cols = torch.arange(width, device=q.device, dtype=torch.int32)[None, :]
-        if has_extra:
-            swa_len = swa_lens[start:end, None]
-            extra_len = extra_lens[start:end, None]  # type: ignore[index]
-            local = torch.where(cols < swa_len, cols, swa_topk + (cols - swa_len))
-            valid = cols < (swa_len + extra_len)
-            indices = torch.where(valid, row_base + local, row_base)
-        else:
-            indices = row_base + cols
-        sparse_attention_triton(
-            q=q[start:end],
-            kv=kv.view(-1, 1, head_dim),
-            indices=indices.unsqueeze(1),
-            lengths=lengths,
-            scale=float(scale),
-            attn_sink=attn_sink,
-            out=out[start:end],
-        )
-    return out
+    return torch.ops.flash_mla.fwd_sparse_prefill_mla(
+        q,
+        swa_cache,
+        swa_indices,
+        swa_lens,
+        float(scale),
+        attn_sink,
+        extra_cache,
+        extra_indices,
+        extra_lens,
+    )

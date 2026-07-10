@@ -197,8 +197,7 @@ def test_sparse_mla_prefill_parity(H, T):
 
 @pytest.mark.parametrize("H", [64])
 @pytest.mark.parametrize("T", [256])
-@pytest.mark.parametrize("use_staged_prefill", [False, True])
-def test_sparse_mla_prefill_two_stream_parity(H, T, use_staged_prefill):
+def test_sparse_mla_prefill_two_stream_parity(H, T):
     """Prefill with SWA plus compressed-cache streams.
 
     This is the shape vLLM wires for DeepSeek-V4 sparse MLA prefill: two paged
@@ -240,7 +239,6 @@ def test_sparse_mla_prefill_two_stream_parity(H, T, use_staged_prefill):
         q=q, swa_cache=swa_cache, swa_indices=swa_idx, swa_lens=swa_lens,
         scale=scale, attn_sink=attn_sink,
         extra_cache=extra_cache, extra_indices=extra_idx, extra_lens=extra_lens,
-        use_staged_prefill=use_staged_prefill,
     )
     cd = cos_diff(out.float(), O_ref)
     assert cd < 8e-5, f"two-stream sparse-MLA prefill cos_diff={cd:.2e} (H={H} T={T})"

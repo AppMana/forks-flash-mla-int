@@ -113,7 +113,7 @@ bool sparse_mla_decode_fused_enabled();
 bool sparse_mla_decode_mma_enabled();
 void run_sparse_mla_decode(Sparse_mla_decode_params &params, cudaStream_t stream);
 
-struct Sparse_mla_prefill_staged_params {
+struct Sparse_mla_prefill_params {
     int num_tokens, num_heads, width;
     int swa_topk, swa_num_blocks, swa_block_size;
     int extra_topk, extra_num_blocks, extra_block_size;
@@ -139,17 +139,11 @@ struct Sparse_mla_prefill_staged_params {
     bool int8_cache;
 };
 
-void run_sparse_mla_prefill_staged(Sparse_mla_prefill_staged_params &params,
-                                   cudaStream_t stream);
-
-// Fused tensor-core prefill (fp8 cache only). Returns false when the params are
-// unsupported (int8 cache) and the caller must fall back to the staged path.
-// When the fused path runs, kv_ptr is the [total_slots, 512] bf16 whole-cache
-// dequant buffer (not the [T, width, 512] staged gather buffer) -- the binding
-// sizes the workspace via sparse_mla_prefill_fused_enabled().
-bool sparse_mla_prefill_fused_enabled(bool int8_cache);
-bool run_sparse_mla_prefill_fused_mma(Sparse_mla_prefill_staged_params &params,
-                                      cudaStream_t stream);
+// Fused tensor-core sparse-MLA prefill. Handles BOTH fp8_ds_mla and int8_ds_mla
+// caches (params.int8_cache selects the dequant path). kv_ptr is the
+// [total_slots, 512] bf16 whole-cache dequant buffer, sized by the binding.
+void run_sparse_mla_prefill(Sparse_mla_prefill_params &params,
+                            cudaStream_t stream);
 
 void run_debug_imma_m16n8k32_s8s8(const int8_t *a, const int8_t *b,
                                   int32_t *out, cudaStream_t stream);

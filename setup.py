@@ -224,7 +224,6 @@ def get_sources():
         "csrc/flash_api_dispatch.cu",
         "csrc/debug_imma_sm80.cu",
         "csrc/flash_sparse_mla_decode_sm80.cu",
-        "csrc/flash_sparse_mla_prefill_staged_sm80.cu",
         "csrc/flash_sparse_mla_prefill_fused_sm80.cu",
         "csrc/flash_fwd_mla_bf16_sm80.cu",
         "csrc/flash_fwd_mla_bf16_ws_sm80.cu",

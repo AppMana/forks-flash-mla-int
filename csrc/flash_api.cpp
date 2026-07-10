@@ -386,7 +386,7 @@ mha_fwd_sparse_decode_mla(
 }
 
 Tensor
-mha_fwd_sparse_prefill_staged_mla(
+mha_fwd_sparse_prefill_mla(
     Tensor q,
     Tensor swa_cache,
     Tensor swa_indices,
@@ -399,7 +399,7 @@ mha_fwd_sparse_prefill_staged_mla(
 ) {
     int device = torch::stable::accelerator::getCurrentDeviceIndex();
     auto props = get_dev_props(device);
-    STD_TORCH_CHECK(props.major == 8, "sparse-MLA staged prefill kernel is Ampere (sm_8x) only");
+    STD_TORCH_CHECK(props.major == 8, "sparse-MLA prefill kernel is Ampere (sm_8x) only");
 
     int T = q.size(0), H = q.size(1), D = q.size(2);
     STD_TORCH_CHECK(D == 512, "head_dim must be 512");
@@ -412,19 +412,17 @@ mha_fwd_sparse_prefill_staged_mla(
     int swa_topk = swa_indices.size(1);
     int extra_topk = extra_indices.has_value() ? extra_indices.value().size(1) : 0;
     int width = swa_topk + extra_topk;
-    STD_TORCH_CHECK(width > 0, "staged prefill requires at least one selected slot");
+    STD_TORCH_CHECK(width > 0, "prefill requires at least one selected slot");
 
     torch::stable::accelerator::DeviceGuard guard(device);
     Tensor out = torch::stable::new_empty(q, {T, H, D});
-    // fused path: whole-cache bf16 dequant buffer; staged path: per-token gather buffer
+    // fused path: whole-cache bf16 dequant buffer
     int64_t total_slots = swa_cache.size(0) * swa_cache.size(1)
         + (extra_cache.has_value()
                ? extra_cache.value().size(0) * extra_cache.value().size(1) : (int64_t)0);
-    Tensor kv = sparse_mla_prefill_fused_enabled(false)
-        ? torch::stable::new_empty(q, {total_slots, D})
-        : torch::stable::new_empty(q, {T, width, D});
+    Tensor kv = torch::stable::new_empty(q, {total_slots, D});
 
-    Sparse_mla_prefill_staged_params p = {};
+    Sparse_mla_prefill_params p = {};
     p.num_tokens = T;
     p.num_heads = H;
     p.width = width;
@@ -458,12 +456,12 @@ mha_fwd_sparse_prefill_staged_mla(
     }
     p.int8_cache = false;
     cudaStream_t stream = current_cuda_stream(device);
-    run_sparse_mla_prefill_staged(p, stream);
+    run_sparse_mla_prefill(p, stream);
     return out;
 }
 
 Tensor
-mha_fwd_sparse_int8_prefill_staged_mla(
+mha_fwd_sparse_int8_prefill_mla(
     Tensor q,
     Tensor swa_cache,
     Tensor swa_scale,
@@ -478,7 +476,7 @@ mha_fwd_sparse_int8_prefill_staged_mla(
 ) {
     int device = torch::stable::accelerator::getCurrentDeviceIndex();
     auto props = get_dev_props(device);
-    STD_TORCH_CHECK(props.major == 8, "sparse-MLA int8 staged prefill kernel is Ampere (sm_8x) only");
+    STD_TORCH_CHECK(props.major == 8, "sparse-MLA int8 prefill kernel is Ampere (sm_8x) only");
 
     int T = q.size(0), H = q.size(1), D = q.size(2);
     STD_TORCH_CHECK(D == 512, "head_dim must be 512");
@@ -492,19 +490,17 @@ mha_fwd_sparse_int8_prefill_staged_mla(
     int swa_topk = swa_indices.size(1);
     int extra_topk = extra_indices.has_value() ? extra_indices.value().size(1) : 0;
     int width = swa_topk + extra_topk;
-    STD_TORCH_CHECK(width > 0, "staged prefill requires at least one selected slot");
+    STD_TORCH_CHECK(width > 0, "prefill requires at least one selected slot");
 
     torch::stable::accelerator::DeviceGuard guard(device);
     Tensor out = torch::stable::new_empty(q, {T, H, D});
-    // fused path: whole-cache bf16 dequant buffer; staged path: per-token gather buffer
+    // fused path: whole-cache bf16 dequant buffer
     int64_t total_slots = swa_cache.size(0) * swa_cache.size(1)
         + (extra_cache.has_value()
                ? extra_cache.value().size(0) * extra_cache.value().size(1) : (int64_t)0);
-    Tensor kv = sparse_mla_prefill_fused_enabled(true)
-        ? torch::stable::new_empty(q, {total_slots, D})
-        : torch::stable::new_empty(q, {T, width, D});
+    Tensor kv = torch::stable::new_empty(q, {total_slots, D});
 
-    Sparse_mla_prefill_staged_params p = {};
+    Sparse_mla_prefill_params p = {};
     p.num_tokens = T;
     p.num_heads = H;
     p.width = width;
@@ -548,7 +544,7 @@ mha_fwd_sparse_int8_prefill_staged_mla(
     }
     p.int8_cache = true;
     cudaStream_t stream = current_cuda_stream(device);
-    run_sparse_mla_prefill_staged(p, stream);
+    run_sparse_mla_prefill(p, stream);
     return out;
 }
 
@@ -619,7 +615,7 @@ void boxed_fwd_sparse_decode_mla(StableIValue *stack, uint64_t num_args, uint64_
     stack[0] = from(res);
 }
 
-void boxed_fwd_sparse_prefill_staged_mla(StableIValue *stack, uint64_t num_args, uint64_t num_outputs) {
+void boxed_fwd_sparse_prefill_mla(StableIValue *stack, uint64_t num_args, uint64_t num_outputs) {
     auto q = to<Tensor>(stack[0]);
     auto swa_cache = to<Tensor>(stack[1]);
     auto swa_indices = to<Tensor>(stack[2]);
@@ -629,13 +625,13 @@ void boxed_fwd_sparse_prefill_staged_mla(StableIValue *stack, uint64_t num_args,
     auto extra_cache = to<std::optional<Tensor>>(stack[6]);
     auto extra_indices = to<std::optional<Tensor>>(stack[7]);
     auto extra_lens = to<std::optional<Tensor>>(stack[8]);
-    auto res = mha_fwd_sparse_prefill_staged_mla(q, swa_cache, swa_indices, swa_lens,
-                                                 scale, attn_sink, extra_cache,
-                                                 extra_indices, extra_lens);
+    auto res = mha_fwd_sparse_prefill_mla(q, swa_cache, swa_indices, swa_lens,
+                                          scale, attn_sink, extra_cache,
+                                          extra_indices, extra_lens);
     stack[0] = from(res);
 }
 
-void boxed_fwd_sparse_int8_prefill_staged_mla(StableIValue *stack, uint64_t num_args, uint64_t num_outputs) {
+void boxed_fwd_sparse_int8_prefill_mla(StableIValue *stack, uint64_t num_args, uint64_t num_outputs) {
     auto q = to<Tensor>(stack[0]);
     auto swa_cache = to<Tensor>(stack[1]);
     auto swa_scale = to<Tensor>(stack[2]);
@@ -647,11 +643,11 @@ void boxed_fwd_sparse_int8_prefill_staged_mla(StableIValue *stack, uint64_t num_
     auto extra_scale = to<std::optional<Tensor>>(stack[8]);
     auto extra_indices = to<std::optional<Tensor>>(stack[9]);
     auto extra_lens = to<std::optional<Tensor>>(stack[10]);
-    auto res = mha_fwd_sparse_int8_prefill_staged_mla(q, swa_cache, swa_scale,
-                                                      swa_indices, swa_lens,
-                                                      scale, attn_sink, extra_cache,
-                                                      extra_scale, extra_indices,
-                                                      extra_lens);
+    auto res = mha_fwd_sparse_int8_prefill_mla(q, swa_cache, swa_scale,
+                                               swa_indices, swa_lens,
+                                               scale, attn_sink, extra_cache,
+                                               extra_scale, extra_indices,
+                                               extra_lens);
     stack[0] = from(res);
 }
 
@@ -670,10 +666,10 @@ STABLE_TORCH_LIBRARY(flash_mla, m) {
     m.def("fwd_sparse_decode_mla(Tensor q, Tensor swa_cache, Tensor swa_indices, Tensor swa_lens, "
           "float scale, Tensor? attn_sink, Tensor? extra_cache, Tensor? extra_indices, "
           "Tensor? extra_lens) -> Tensor");
-    m.def("fwd_sparse_prefill_staged_mla(Tensor q, Tensor swa_cache, Tensor swa_indices, Tensor swa_lens, "
+    m.def("fwd_sparse_prefill_mla(Tensor q, Tensor swa_cache, Tensor swa_indices, Tensor swa_lens, "
           "float scale, Tensor? attn_sink, Tensor? extra_cache, Tensor? extra_indices, "
           "Tensor? extra_lens) -> Tensor");
-    m.def("fwd_sparse_int8_prefill_staged_mla(Tensor q, Tensor swa_cache, Tensor swa_scale, "
+    m.def("fwd_sparse_int8_prefill_mla(Tensor q, Tensor swa_cache, Tensor swa_scale, "
           "Tensor swa_indices, Tensor swa_lens, float scale, Tensor? attn_sink, "
           "Tensor? extra_cache, Tensor? extra_scale, Tensor? extra_indices, Tensor? extra_lens) -> Tensor");
     m.def("debug_imma_m16n8k32_s8s8(Tensor a, Tensor b) -> Tensor");
@@ -683,8 +679,8 @@ STABLE_TORCH_LIBRARY_IMPL(flash_mla, CUDA, m) {
     m.impl("get_mla_metadata", &boxed_get_mla_metadata);
     m.impl("fwd_kvcache_mla", &boxed_fwd_kvcache_mla);
     m.impl("fwd_sparse_decode_mla", &boxed_fwd_sparse_decode_mla);
-    m.impl("fwd_sparse_prefill_staged_mla", &boxed_fwd_sparse_prefill_staged_mla);
-    m.impl("fwd_sparse_int8_prefill_staged_mla", &boxed_fwd_sparse_int8_prefill_staged_mla);
+    m.impl("fwd_sparse_prefill_mla", &boxed_fwd_sparse_prefill_mla);
+    m.impl("fwd_sparse_int8_prefill_mla", &boxed_fwd_sparse_int8_prefill_mla);
     m.impl("debug_imma_m16n8k32_s8s8", &boxed_debug_imma_m16n8k32_s8s8);
 }
 

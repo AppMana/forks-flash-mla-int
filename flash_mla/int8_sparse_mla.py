@@ -290,7 +290,7 @@ def triton_sparse_int8_mla_decode(
     )
     return out
 
-def sparse_int8_mla_prefill_native_staged(
+def sparse_int8_mla_prefill(
     q: torch.Tensor,
     swa_cache: torch.Tensor,
     swa_scale: torch.Tensor,
@@ -303,6 +303,11 @@ def sparse_int8_mla_prefill_native_staged(
     extra_indices: Optional[torch.Tensor] = None,
     extra_lens: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
+    """Native fused int8_ds_mla sparse-MLA prefill (Ampere sm_86).
+
+    Same fused tensor-core kernel as the fp8 prefill, taking int8 rows plus per-token
+    scales. The legacy staged path was removed; this is the sole int8 prefill kernel.
+    """
     if q.shape[-1] != HEAD_DIM:
         raise ValueError(f"expected q head dim {HEAD_DIM}, got {q.shape[-1]}")
     if scale is None:
@@ -315,11 +320,11 @@ def sparse_int8_mla_prefill_native_staged(
         if extra_indices.shape[1] != 1:
             raise ValueError(f"expected singleton sparse index head dim, got {extra_indices.shape}")
         extra_indices = extra_indices[:, 0]
-    if not hasattr(torch.ops.flash_mla, "fwd_sparse_int8_prefill_staged_mla"):
+    if not hasattr(torch.ops.flash_mla, "fwd_sparse_int8_prefill_mla"):
         raise NotImplementedError(
-            "torch.ops.flash_mla.fwd_sparse_int8_prefill_staged_mla is not built yet"
+            "torch.ops.flash_mla.fwd_sparse_int8_prefill_mla is not built yet"
         )
-    return torch.ops.flash_mla.fwd_sparse_int8_prefill_staged_mla(
+    return torch.ops.flash_mla.fwd_sparse_int8_prefill_mla(
         q,
         swa_cache,
         swa_scale,

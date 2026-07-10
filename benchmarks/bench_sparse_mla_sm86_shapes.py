@@ -328,7 +328,6 @@ def bench_prefill(case: Case, layer: str, extra_topk: int, extra_block: int, arg
         extra_cache=case.extra_cache,
         extra_indices=case.extra_idx,
         extra_lens=case.extra_lens,
-        use_staged_prefill=False,
     )
     if sparse_attention_triton is not None:
         kv, indices, lengths = build_gathered_prefill(case)
@@ -367,31 +366,6 @@ def bench_prefill(case: Case, layer: str, extra_topk: int, extra_block: int, arg
                 extra_cache=case.extra_cache,
                 extra_indices=case.extra_idx,
                 extra_lens=case.extra_lens,
-                use_staged_prefill=False,
-            ),
-            args.warmup,
-            args.iters,
-        ),
-    )
-    print_row(
-        "prefill",
-        layer,
-        tokens,
-        extra_topk,
-        extra_block,
-        "flashmla_staged",
-        time_us(
-            lambda: flash_sparse_mla_prefill(
-                q=case.q,
-                swa_cache=case.swa_cache,
-                swa_indices=case.swa_idx.unsqueeze(1),
-                swa_lens=case.swa_lens,
-                scale=case.scale,
-                attn_sink=case.sink,
-                extra_cache=case.extra_cache,
-                extra_indices=case.extra_idx,
-                extra_lens=case.extra_lens,
-                use_staged_prefill=True,
             ),
             args.warmup,
             args.iters,

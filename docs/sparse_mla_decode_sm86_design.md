@@ -156,15 +156,21 @@ against `decode_sparse_attention_triton` (same inputs → same output).
 
 ## PREFILL REWRITE (2026-07-09) — fused tensor-core kernel, beats production Triton 1.7-1.9x
 
-The staged prefill (`flash_sparse_mla_prefill_staged_sm80.cu`, gather-to-dense +
+The old staged prefill (`flash_sparse_mla_prefill_staged_sm80.cu`, gather-to-dense +
 smem attention) LOST to the production vLLM Triton prefill (dequant_gather +
 `sparse_attention_triton`) at REAL 16k-slot caches: 13.65 vs 5.74 us/tok at
 T=1024/width 512 (the old ~24.6 us/tok "FMA wins / gather-latency-bound at 6% BW"
 conclusion was an artifact of the 192-slot L2-resident microbench in
 `bench_sparse_mla_sm86_shapes`; at production shapes the tensor-core Triton paths
 are 2.4-5x faster than both native paths). Ground-up rewrite in
-`csrc/flash_sparse_mla_prefill_fused_sm80.cu`, exported through the same
-`flash_sparse_mla_prefill` op (env kill-switch `FLASH_MLA_PREFILL_FUSED=0`).
+`csrc/flash_sparse_mla_prefill_fused_sm80.cu`, exported through the
+`flash_sparse_mla_prefill` op.
+
+**(2026-07-09, removal)** The staged kernel, its `FLASH_MLA_PREFILL_FUSED=0`
+kill-switch, and the `use_staged_prefill` wrapper kwarg were DELETED. The fused
+kernel is the sole sparse-MLA prefill path (fp8 and int8). The staged path was
+unreachable in production (vLLM never set `use_staged_prefill`) and measured ~4x
+slower at the true 16k footprint. The table below is kept as a historical record.
 
 **The two structural insights (both from ncu):**
 1. **Per-use fp8 decode is the dominant cost, not the gather or the FLOPs.** At

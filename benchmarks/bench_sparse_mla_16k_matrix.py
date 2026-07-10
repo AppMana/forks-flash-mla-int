@@ -22,7 +22,7 @@ from flash_mla import flash_sparse_mla_decode, flash_sparse_mla_prefill
 from flash_mla.int8_sparse_mla import (
     quantize_int8_ds_mla_rows,
     triton_sparse_int8_mla_decode,
-    sparse_int8_mla_prefill_native_staged,
+    sparse_int8_mla_prefill,
 )
 from vllm.triton_utils import LOG2E, triton
 from vllm.models.deepseek_v4.common.ops.cache_utils import (
@@ -278,33 +278,7 @@ def main() -> None:
     pre_swa_lens = torch.full((args.prefill_tokens,), args.swa_topk, dtype=torch.int32, device=device)
     pre_extra_lens = torch.full((args.prefill_tokens,), args.extra_topk, dtype=torch.int32, device=device)
 
-    if args.only in (None, "prefill-fp8-native"):
-        row(
-        "prefill",
-        "fp8",
-        "native_staged",
-        args.prefill_tokens,
-        time_us(
-            lambda: flash_sparse_mla_prefill(
-                q_prefill,
-                swa_cache,
-                pre_swa_idx.unsqueeze(1),
-                pre_swa_lens,
-                scale=scale,
-                attn_sink=sink,
-                extra_cache=extra_cache,
-                extra_indices=pre_extra_idx,
-                extra_lens=pre_extra_lens,
-                use_staged_prefill=True,
-            ),
-            args.warmup,
-            args.iters,
-        ),
-        )
-        if args.only is not None:
-            return
-
-    if args.only in (None, "prefill-fp8-native-fused"):
+    if args.only in (None, "prefill-fp8-native", "prefill-fp8-native-fused"):
         row(
         "prefill",
         "fp8",
@@ -321,7 +295,6 @@ def main() -> None:
                 extra_cache=extra_cache,
                 extra_indices=pre_extra_idx,
                 extra_lens=pre_extra_lens,
-                use_staged_prefill=False,
             ),
             args.warmup,
             args.iters,
@@ -367,10 +340,10 @@ def main() -> None:
         row(
         "prefill",
         "int8",
-        "native_staged",
+        "native_fused",
         args.prefill_tokens,
         time_us(
-            lambda: sparse_int8_mla_prefill_native_staged(
+            lambda: sparse_int8_mla_prefill(
                 q_prefill,
                 int8_swa,
                 int8_swa_scale,

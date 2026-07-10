@@ -53,9 +53,8 @@ def _ref(q, swa_K, swa_idx, swa_lens, extra_K, extra_idx, extra_lens, scale, sin
     return out
 
 
-@pytest.mark.parametrize("use_staged", [True, False])
 @pytest.mark.parametrize("swa_topk,extra_topk", [(256, 256), (512, 512)])
-def test_prefill_adversarial_parity(use_staged, swa_topk, extra_topk):
+def test_prefill_adversarial_parity(swa_topk, extra_topk):
     if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
         pytest.skip("requires Ampere")
     from flash_mla import flash_sparse_mla_prefill
@@ -89,16 +88,14 @@ def test_prefill_adversarial_parity(use_staged, swa_topk, extra_topk):
         q=q, swa_cache=swa_cache, swa_indices=swa_idx, swa_lens=swa_lens,
         scale=scale, attn_sink=sink,
         extra_cache=extra_cache, extra_indices=extra_idx, extra_lens=extra_lens,
-        use_staged_prefill=use_staged,
     )
     cd = cos_diff(out.float(), O_ref)
-    assert cd < 8e-5, f"prefill adversarial cos_diff={cd:.2e} (staged={use_staged} topk={swa_topk}+{extra_topk})"
+    assert cd < 8e-5, f"prefill adversarial cos_diff={cd:.2e} (topk={swa_topk}+{extra_topk})"
     # elementwise check at the production tolerance convention
     torch.testing.assert_close(out.float(), O_ref, rtol=2e-2, atol=2e-2)
 
 
-@pytest.mark.parametrize("use_staged", [True, False])
-def test_prefill_swa_only_parity(use_staged):
+def test_prefill_swa_only_parity():
     if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
         pytest.skip("requires Ampere")
     from flash_mla import flash_sparse_mla_prefill
@@ -118,7 +115,7 @@ def test_prefill_swa_only_parity(use_staged):
     O_ref = _ref(q, K, idx, lens, None, None, None, scale, sink)
     out = flash_sparse_mla_prefill(
         q=q, swa_cache=cache, swa_indices=idx, swa_lens=lens,
-        scale=scale, attn_sink=sink, use_staged_prefill=use_staged,
+        scale=scale, attn_sink=sink,
     )
     cd = cos_diff(out.float(), O_ref)
-    assert cd < 8e-5, f"swa-only prefill cos_diff={cd:.2e} (staged={use_staged})"
+    assert cd < 8e-5, f"swa-only prefill cos_diff={cd:.2e}"
