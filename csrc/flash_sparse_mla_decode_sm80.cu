@@ -12,6 +12,7 @@
 #include <cuda_fp8.h>
 #include <cuda_bf16.h>
 #include <cuda_pipeline.h>
+#include <cassert>
 #include <cstdint>
 #include <math.h>
 
@@ -156,6 +157,23 @@ __global__ void sparse_mla_selection_dequant_kernel(__grid_constant__ const Spar
 
     if (s < 0 || s >= nslots) {
         dst[threadIdx.x] = __nv_bfloat162(__float2bfloat16(0.f), __float2bfloat16(0.f));
+        return;
+    }
+    if (p.int8_cache) {
+        // int8_ds_mla: 512 int8 payload bytes + one fp32 rowwise scale, both
+        // addressed through runtime strides (vLLM's 528B inline layout or the
+        // separate-tensor layout). bf16 = int8 * scale.
+        const int b = s / bsize, pos = s - b * bsize;
+        const int64_t pstride = is_ex ? p.extra_pos_stride : p.swa_pos_stride;
+        const float *scale_base = is_ex ? p.extra_scale_ptr : p.swa_scale_ptr;
+        const int64_t sbstride = is_ex ? p.extra_scale_block_stride : p.swa_scale_block_stride;
+        const int64_t spstride = is_ex ? p.extra_scale_pos_stride : p.swa_scale_pos_stride;
+        const int8_t *row = reinterpret_cast<const int8_t *>(cache)
+            + (int64_t)b * bstride + (int64_t)pos * pstride;
+        const float sc = scale_base[(int64_t)b * sbstride + (int64_t)pos * spstride];
+        dst[threadIdx.x] = __nv_bfloat162(
+            __float2bfloat16((float)row[d] * sc),
+            __float2bfloat16((float)row[d + 1] * sc));
         return;
     }
     const uint8_t *data, *scale;
@@ -1195,7 +1213,14 @@ void run_sparse_mla_decode(Sparse_mla_decode_params &params, cudaStream_t stream
         const char *e = getenv("FLASH_MLA_PREFILL_MMA");
         return e && (e[0] == '1' || e[0] == 'y' || e[0] == 'Y');
     }();
-    if (params.num_splits == 1 && prefill_mma) {
+    if (params.int8_cache) {
+        // int8 rows exist ONLY in the selection-scratch pre-pass; the raw-cache
+        // consumers (mma_pf prefill, legacy in-CTA-dequant split kernel) decode
+        // fp8_ds_mla bytes and must never see an int8 cache. The binding forces
+        // sel_kv allocation for int8.
+        assert(params.sel_kv_ptr != nullptr && params.sel_width > 0);
+    }
+    if (params.num_splits == 1 && prefill_mma && !params.int8_cache) {
         dim3 grid(params.num_tokens, (params.num_heads + mma_pf::BLOCK_M - 1) / mma_pf::BLOCK_M);
         int smem = (int)sizeof(mma_pf::Smem);
         static bool attr_set = false;

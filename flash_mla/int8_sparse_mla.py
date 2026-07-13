@@ -290,6 +290,57 @@ def triton_sparse_int8_mla_decode(
     )
     return out
 
+def sparse_int8_mla_decode(
+    q: torch.Tensor,
+    swa_cache: torch.Tensor,
+    swa_scale: torch.Tensor,
+    swa_indices: torch.Tensor,
+    swa_lens: torch.Tensor,
+    scale: Optional[float] = None,
+    attn_sink: Optional[torch.Tensor] = None,
+    extra_cache: Optional[torch.Tensor] = None,
+    extra_scale: Optional[torch.Tensor] = None,
+    extra_indices: Optional[torch.Tensor] = None,
+    extra_lens: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Native fused int8_ds_mla sparse-MLA decode (Ampere sm_86).
+
+    Same split-KV attention kernels as the fp8 ``flash_sparse_mla_decode``; the
+    selection-scratch dequant pre-pass converts the selected int8 rows
+    (rowwise fp32 scale, runtime strides -- vLLM's 528B inline views or
+    separate tensors) to bf16 once, so only the pre-pass differs from fp8.
+    """
+    if q.shape[-1] != HEAD_DIM:
+        raise ValueError(f"expected q head dim {HEAD_DIM}, got {q.shape[-1]}")
+    if scale is None:
+        scale = 1.0 / math.sqrt(HEAD_DIM)
+    if swa_indices.dim() == 3:
+        if swa_indices.shape[1] != 1:
+            raise ValueError(f"expected singleton sparse index head dim, got {swa_indices.shape}")
+        swa_indices = swa_indices[:, 0]
+    if extra_indices is not None and extra_indices.dim() == 3:
+        if extra_indices.shape[1] != 1:
+            raise ValueError(f"expected singleton sparse index head dim, got {extra_indices.shape}")
+        extra_indices = extra_indices[:, 0]
+    if not hasattr(torch.ops.flash_mla, "fwd_sparse_int8_decode_mla"):
+        raise NotImplementedError(
+            "torch.ops.flash_mla.fwd_sparse_int8_decode_mla is not built yet"
+        )
+    return torch.ops.flash_mla.fwd_sparse_int8_decode_mla(
+        q,
+        swa_cache,
+        swa_scale,
+        swa_indices,
+        swa_lens,
+        float(scale),
+        attn_sink,
+        extra_cache,
+        extra_scale,
+        extra_indices,
+        extra_lens,
+    )
+
+
 def sparse_int8_mla_prefill(
     q: torch.Tensor,
     swa_cache: torch.Tensor,

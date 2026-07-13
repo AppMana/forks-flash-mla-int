@@ -9,7 +9,11 @@ from pathlib import Path
 import torch
 
 from flash_mla import flash_sparse_mla_decode
-from flash_mla.int8_sparse_mla import quantize_int8_ds_mla_rows, triton_sparse_int8_mla_decode
+from flash_mla.int8_sparse_mla import (
+    quantize_int8_ds_mla_rows,
+    sparse_int8_mla_decode,
+    triton_sparse_int8_mla_decode,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bench_sparse_mla_sm86_shapes import (  # noqa: E402
@@ -78,6 +82,7 @@ def run(args):
             ref = fp32_ref(q, fp8_rows, indices, lens, scale, sink)
             out_fp8 = flash_sparse_mla_decode(q, fp8_cache, indices, lens, scale=scale, attn_sink=sink)
             out_i8 = triton_sparse_int8_mla_decode(q, int8_cache, int8_scale, indices, lens, scale=scale, attn_sink=sink)
+            out_i8_native = sparse_int8_mla_decode(q, int8_cache, int8_scale, indices, lens, scale=scale, attn_sink=sink)
 
             rows_to_print = [
                 (
@@ -91,6 +96,12 @@ def run(args):
                     time_us(lambda: triton_sparse_int8_mla_decode(q, int8_cache, int8_scale, indices, lens, scale=scale, attn_sink=sink),
                             args.warmup, args.iters),
                     cos_diff(out_i8.float(), ref),
+                ),
+                (
+                    "int8_flashmla",
+                    time_us(lambda: sparse_int8_mla_decode(q, int8_cache, int8_scale, indices, lens, scale=scale, attn_sink=sink),
+                            args.warmup, args.iters),
+                    cos_diff(out_i8_native.float(), ref),
                 ),
             ]
             for name, us, cd in rows_to_print:

@@ -101,6 +101,17 @@ struct Sparse_mla_decode_params {
     // redundancy). nullptr on the legacy in-CTA-dequant path.
     void *sel_kv_ptr;
     int sel_width;
+    // int8_ds_mla cache (rowwise int8 + fp32 scale), addressed ONLY through these
+    // runtime strides (the vLLM 528-byte token layout arrives as strided views).
+    // int8_cache=true selects the int8 dequant in the selection-scratch pre-pass;
+    // the binding forces the fused path, so the attention kernels stay bf16-only.
+    const float *swa_scale_ptr;        // [nb, bs] fp32 or nullptr for fp8
+    int64_t swa_pos_stride;            // int8 bytes between tokens in a block
+    int64_t swa_scale_block_stride, swa_scale_pos_stride;  // in elements
+    const float *extra_scale_ptr;
+    int64_t extra_pos_stride;
+    int64_t extra_scale_block_stride, extra_scale_pos_stride;
+    bool int8_cache;
 };
 
 // True when the selection-scratch fused decode path is enabled (env kill-switch

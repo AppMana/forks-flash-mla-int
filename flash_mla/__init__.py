@@ -9,6 +9,7 @@ from .flash_mla_interface import (
 )
 from .int8_sparse_mla import (
     quantize_int8_ds_mla_rows,
+    sparse_int8_mla_decode,
     sparse_int8_mla_prefill,
     triton_sparse_int8_mla_decode,
 )
