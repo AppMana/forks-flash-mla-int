@@ -11,7 +11,7 @@ name: Build wheels (stable ABI, cp39-abi3)
 
 on:
   push:
-    branches: [build-wheels, appmana/sm86-smem-analysis, appmana/vllm-ampere, main]
+    branches: [build-wheels, appmana/vllm-ampere, appmana/vllm-ampere, main]
     tags: ["v*"]
   workflow_dispatch:
 
