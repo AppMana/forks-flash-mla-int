@@ -186,7 +186,7 @@ def _sparse_int8_mla_kernel(
     )
 
 
-def triton_sparse_int8_mla_decode(
+def sparse_mla_decode_int8_triton(
     q: torch.Tensor,
     swa_cache: torch.Tensor,
     swa_scale: torch.Tensor,
@@ -290,7 +290,7 @@ def triton_sparse_int8_mla_decode(
     )
     return out
 
-def sparse_int8_mla_decode(
+def sparse_mla_decode_int8(
     q: torch.Tensor,
     swa_cache: torch.Tensor,
     swa_scale: torch.Tensor,
@@ -341,7 +341,7 @@ def sparse_int8_mla_decode(
     )
 
 
-def sparse_int8_mla_prefill(
+def sparse_mla_prefill_int8(
     q: torch.Tensor,
     swa_cache: torch.Tensor,
     swa_scale: torch.Tensor,
@@ -388,3 +388,9 @@ def sparse_int8_mla_prefill(
         extra_indices,
         extra_lens,
     )
+
+
+# Deprecated aliases (pre-harmonization names).
+sparse_int8_mla_decode = sparse_mla_decode_int8
+sparse_int8_mla_prefill = sparse_mla_prefill_int8
+triton_sparse_int8_mla_decode = sparse_mla_decode_int8_triton

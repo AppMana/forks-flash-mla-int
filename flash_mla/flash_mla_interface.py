@@ -144,7 +144,7 @@ def flash_mla_with_kvcache_int8(
     return out, softmax_lse
 
 
-def flash_sparse_mla_decode(
+def sparse_mla_decode_fp8(
     q: torch.Tensor,
     swa_cache: torch.Tensor,
     swa_indices: torch.Tensor,
@@ -195,7 +195,7 @@ def flash_sparse_mla_decode(
     )
 
 
-def flash_sparse_mla_prefill(
+def sparse_mla_prefill(
     q: torch.Tensor,
     swa_cache: torch.Tensor,
     swa_indices: torch.Tensor,
@@ -215,12 +215,12 @@ def flash_sparse_mla_prefill(
     On Ampere this runs the native fused tensor-core kernel: the whole fp8_ds_mla cache
     is dequantized once into a dense bf16 buffer, then a gather-bf16 mma.m16n8k16
     attention kernel with a cp.async ring computes the output directly
-    (csrc/flash_sparse_mla_prefill_fused_sm80.cu). The legacy staged two-kernel gather
+    (csrc/sparse_mla_prefill_fused_sm80.cu). The legacy staged two-kernel gather
     path and its ``FLASH_MLA_PREFILL_FUSED`` kill-switch were removed: the fused kernel
     is the sole path (unreachable-by-production dead code, ~4x slower at the true 16k
     footprint; see README).
 
-    Arguments mirror :func:`flash_sparse_mla_decode`, with ``q`` shaped
+    Arguments mirror :func:`sparse_mla_decode_fp8`, with ``q`` shaped
     ``(num_query_tokens, num_heads, 512)`` and ``swa_indices``/``swa_lens`` carrying the
     per-query-token selection. Returns ``(num_query_tokens, num_heads, 512)`` bfloat16.
     """
@@ -243,3 +243,10 @@ def flash_sparse_mla_prefill(
         extra_indices,
         extra_lens,
     )
+
+
+# Deprecated aliases (pre-harmonization names; the appmana kernel-config
+# symbols are now role-named: sparse_mla_prefill / sparse_mla_decode_fp8 /
+# sparse_mla_decode_int8). Kept importable for older configs and callers.
+flash_sparse_mla_decode = sparse_mla_decode_fp8
+flash_sparse_mla_prefill = sparse_mla_prefill
