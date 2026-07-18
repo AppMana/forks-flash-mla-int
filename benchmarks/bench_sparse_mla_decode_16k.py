@@ -112,7 +112,7 @@ def main() -> None:
     device = f"cuda:{args.device}"
     scale = 1.0 / math.sqrt(HEAD_DIM)
 
-    from flash_mla import flash_sparse_mla_decode
+    from flash_mla import sparse_mla_decode_fp8
 
     swa_cache, swa_K = build_cache_fast(args.context, 256, device, args.seed)
     extra_cache, extra_K = build_cache_fast(args.context, args.extra_block, device, args.seed + 1)
@@ -137,7 +137,7 @@ def main() -> None:
         extra_lens = torch.full((args.tokens,), extra_topk, dtype=torch.int32, device=device)
 
         def run_native():
-            return flash_sparse_mla_decode(
+            return sparse_mla_decode_fp8(
                 q, swa_cache, swa_idx, swa_lens, scale=scale, attn_sink=sink,
                 extra_cache=extra_cache, extra_indices=extra_idx, extra_lens=extra_lens,
             )

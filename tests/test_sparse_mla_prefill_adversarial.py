@@ -57,7 +57,7 @@ def _ref(q, swa_K, swa_idx, swa_lens, extra_K, extra_idx, extra_lens, scale, sin
 def test_prefill_adversarial_parity(swa_topk, extra_topk):
     if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
         pytest.skip("requires Ampere")
-    from flash_mla import flash_sparse_mla_prefill
+    from flash_mla import sparse_mla_prefill
 
     torch.manual_seed(7)
     dev = "cuda"
@@ -84,7 +84,7 @@ def test_prefill_adversarial_parity(swa_topk, extra_topk):
     sink = torch.randn(H, device=dev, dtype=torch.float32) * 0.1
 
     O_ref = _ref(q, swa_K, swa_idx, swa_lens, extra_K, extra_idx, extra_lens, scale, sink)
-    out = flash_sparse_mla_prefill(
+    out = sparse_mla_prefill(
         q=q, swa_cache=swa_cache, swa_indices=swa_idx, swa_lens=swa_lens,
         scale=scale, attn_sink=sink,
         extra_cache=extra_cache, extra_indices=extra_idx, extra_lens=extra_lens,
@@ -98,7 +98,7 @@ def test_prefill_adversarial_parity(swa_topk, extra_topk):
 def test_prefill_swa_only_parity():
     if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
         pytest.skip("requires Ampere")
-    from flash_mla import flash_sparse_mla_prefill
+    from flash_mla import sparse_mla_prefill
 
     torch.manual_seed(11)
     dev = "cuda"
@@ -113,7 +113,7 @@ def test_prefill_swa_only_parity():
     sink = torch.randn(H, device=dev, dtype=torch.float32) * 0.1
 
     O_ref = _ref(q, K, idx, lens, None, None, None, scale, sink)
-    out = flash_sparse_mla_prefill(
+    out = sparse_mla_prefill(
         q=q, swa_cache=cache, swa_indices=idx, swa_lens=lens,
         scale=scale, attn_sink=sink,
     )

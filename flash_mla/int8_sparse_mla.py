@@ -388,9 +388,3 @@ def sparse_mla_prefill_int8(
         extra_indices,
         extra_lens,
     )
-
-
-# Deprecated aliases (pre-harmonization names).
-sparse_int8_mla_decode = sparse_mla_decode_int8
-sparse_int8_mla_prefill = sparse_mla_prefill_int8
-triton_sparse_int8_mla_decode = sparse_mla_decode_int8_triton

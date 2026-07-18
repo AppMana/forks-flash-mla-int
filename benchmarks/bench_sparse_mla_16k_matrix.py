@@ -18,11 +18,11 @@ from bench_sparse_mla_sm86_shapes import (  # noqa: E402
     build_cache,
     time_us,
 )
-from flash_mla import flash_sparse_mla_decode, flash_sparse_mla_prefill
+from flash_mla import sparse_mla_decode_fp8, sparse_mla_prefill
 from flash_mla.int8_sparse_mla import (
     quantize_int8_ds_mla_rows,
-    triton_sparse_int8_mla_decode,
-    sparse_int8_mla_prefill,
+    sparse_mla_decode_int8_triton,
+    sparse_mla_prefill_int8,
 )
 from vllm.triton_utils import LOG2E, triton
 from vllm.models.deepseek_v4.common.ops.cache_utils import (
@@ -285,7 +285,7 @@ def main() -> None:
         "native_fused",
         args.prefill_tokens,
         time_us(
-            lambda: flash_sparse_mla_prefill(
+            lambda: sparse_mla_prefill(
                 q_prefill,
                 swa_cache,
                 pre_swa_idx.unsqueeze(1),
@@ -343,7 +343,7 @@ def main() -> None:
         "native_fused",
         args.prefill_tokens,
         time_us(
-            lambda: sparse_int8_mla_prefill(
+            lambda: sparse_mla_prefill_int8(
                 q_prefill,
                 int8_swa,
                 int8_swa_scale,
@@ -369,7 +369,7 @@ def main() -> None:
         "triton_imma_bh32_bn32",
         args.prefill_tokens,
         time_us(
-            lambda: triton_sparse_int8_mla_decode(
+            lambda: sparse_mla_decode_int8_triton(
                 q_prefill,
                 int8_swa,
                 int8_swa_scale,
@@ -408,7 +408,7 @@ def main() -> None:
         "native",
         args.decode_tokens,
         time_us(
-            lambda: flash_sparse_mla_decode(
+            lambda: sparse_mla_decode_fp8(
                 q_decode,
                 swa_cache,
                 dec_swa_idx,
@@ -593,7 +593,7 @@ def main() -> None:
         "triton_imma_bh32_bn32",
         args.decode_tokens,
         time_us(
-            lambda: triton_sparse_int8_mla_decode(
+            lambda: sparse_mla_decode_int8_triton(
                 q_decode,
                 int8_swa,
                 int8_swa_scale,

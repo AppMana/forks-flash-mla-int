@@ -19,8 +19,8 @@ from dataclasses import dataclass
 import torch
 
 from flash_mla import (
-    flash_sparse_mla_decode,
-    flash_sparse_mla_prefill,
+    sparse_mla_decode_fp8,
+    sparse_mla_prefill,
 )
 
 try:
@@ -223,7 +223,7 @@ def print_row(mode: str, layer: str, tokens: int, extra_topk: int, extra_block: 
 
 def bench_decode(case: Case, layer: str, extra_topk: int, extra_block: int, args: argparse.Namespace) -> None:
     tokens = case.q.shape[0]
-    out_flash = flash_sparse_mla_decode(
+    out_flash = sparse_mla_decode_fp8(
         q=case.q,
         swa_cache=case.swa_cache,
         swa_indices=case.swa_idx,
@@ -263,7 +263,7 @@ def bench_decode(case: Case, layer: str, extra_topk: int, extra_block: int, args
         extra_block,
         "flashmla",
         time_us(
-            lambda: flash_sparse_mla_decode(
+            lambda: sparse_mla_decode_fp8(
                 q=case.q,
                 swa_cache=case.swa_cache,
                 swa_indices=case.swa_idx,
@@ -318,7 +318,7 @@ def bench_decode(case: Case, layer: str, extra_topk: int, extra_block: int, args
 
 def bench_prefill(case: Case, layer: str, extra_topk: int, extra_block: int, args: argparse.Namespace) -> None:
     tokens = case.q.shape[0]
-    out_flash = flash_sparse_mla_prefill(
+    out_flash = sparse_mla_prefill(
         q=case.q,
         swa_cache=case.swa_cache,
         swa_indices=case.swa_idx.unsqueeze(1),
@@ -356,7 +356,7 @@ def bench_prefill(case: Case, layer: str, extra_topk: int, extra_block: int, arg
         extra_block,
         "flashmla_fused",
         time_us(
-            lambda: flash_sparse_mla_prefill(
+            lambda: sparse_mla_prefill(
                 q=case.q,
                 swa_cache=case.swa_cache,
                 swa_indices=case.swa_idx.unsqueeze(1),

@@ -79,7 +79,7 @@ def _build_separate_cache(num_slots: int, block_size: int, dev: str):
 def test_int8_prefill_adversarial_parity(layout, swa_topk, extra_topk):
     if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
         pytest.skip("requires Ampere")
-    from flash_mla.int8_sparse_mla import sparse_int8_mla_prefill
+    from flash_mla.int8_sparse_mla import sparse_mla_prefill_int8
 
     torch.manual_seed(21)
     dev = "cuda"
@@ -105,7 +105,7 @@ def test_int8_prefill_adversarial_parity(layout, swa_topk, extra_topk):
     sink = torch.randn(H, device=dev, dtype=torch.float32) * 0.1
 
     O_ref = _ref(q, swa_K, swa_idx, swa_lens, extra_K, extra_idx, extra_lens, scale, sink)
-    out = sparse_int8_mla_prefill(
+    out = sparse_mla_prefill_int8(
         q,
         swa_cache,
         swa_scale,
@@ -130,7 +130,7 @@ def test_int8_prefill_adversarial_parity(layout, swa_topk, extra_topk):
 def test_int8_prefill_swa_only_parity(layout):
     if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
         pytest.skip("requires Ampere")
-    from flash_mla.int8_sparse_mla import sparse_int8_mla_prefill
+    from flash_mla.int8_sparse_mla import sparse_mla_prefill_int8
 
     torch.manual_seed(23)
     dev = "cuda"
@@ -146,7 +146,7 @@ def test_int8_prefill_swa_only_parity(layout):
     sink = torch.randn(H, device=dev, dtype=torch.float32) * 0.1
 
     O_ref = _ref(q, K, idx, lens, None, None, None, scale, sink)
-    out = sparse_int8_mla_prefill(
+    out = sparse_mla_prefill_int8(
         q, cache, cache_scale, idx, lens, scale=scale, attn_sink=sink,
     )
     cd = cos_diff(out.float(), O_ref)

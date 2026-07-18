@@ -8,11 +8,11 @@ from pathlib import Path
 
 import torch
 
-from flash_mla import flash_sparse_mla_decode
+from flash_mla import sparse_mla_decode_fp8
 from flash_mla.int8_sparse_mla import (
     quantize_int8_ds_mla_rows,
-    sparse_int8_mla_decode,
-    triton_sparse_int8_mla_decode,
+    sparse_mla_decode_int8,
+    sparse_mla_decode_int8_triton,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -80,26 +80,26 @@ def run(args):
             sink = torch.randn(args.heads, device=dev, dtype=torch.float32) * 0.1
 
             ref = fp32_ref(q, fp8_rows, indices, lens, scale, sink)
-            out_fp8 = flash_sparse_mla_decode(q, fp8_cache, indices, lens, scale=scale, attn_sink=sink)
-            out_i8 = triton_sparse_int8_mla_decode(q, int8_cache, int8_scale, indices, lens, scale=scale, attn_sink=sink)
-            out_i8_native = sparse_int8_mla_decode(q, int8_cache, int8_scale, indices, lens, scale=scale, attn_sink=sink)
+            out_fp8 = sparse_mla_decode_fp8(q, fp8_cache, indices, lens, scale=scale, attn_sink=sink)
+            out_i8 = sparse_mla_decode_int8_triton(q, int8_cache, int8_scale, indices, lens, scale=scale, attn_sink=sink)
+            out_i8_native = sparse_mla_decode_int8(q, int8_cache, int8_scale, indices, lens, scale=scale, attn_sink=sink)
 
             rows_to_print = [
                 (
                     "fp8_flashmla",
-                    time_us(lambda: flash_sparse_mla_decode(q, fp8_cache, indices, lens, scale=scale, attn_sink=sink),
+                    time_us(lambda: sparse_mla_decode_fp8(q, fp8_cache, indices, lens, scale=scale, attn_sink=sink),
                             args.warmup, args.iters),
                     cos_diff(out_fp8.float(), ref),
                 ),
                 (
                     "int8_triton_imma",
-                    time_us(lambda: triton_sparse_int8_mla_decode(q, int8_cache, int8_scale, indices, lens, scale=scale, attn_sink=sink),
+                    time_us(lambda: sparse_mla_decode_int8_triton(q, int8_cache, int8_scale, indices, lens, scale=scale, attn_sink=sink),
                             args.warmup, args.iters),
                     cos_diff(out_i8.float(), ref),
                 ),
                 (
                     "int8_flashmla",
-                    time_us(lambda: sparse_int8_mla_decode(q, int8_cache, int8_scale, indices, lens, scale=scale, attn_sink=sink),
+                    time_us(lambda: sparse_mla_decode_int8(q, int8_cache, int8_scale, indices, lens, scale=scale, attn_sink=sink),
                             args.warmup, args.iters),
                     cos_diff(out_i8_native.float(), ref),
                 ),

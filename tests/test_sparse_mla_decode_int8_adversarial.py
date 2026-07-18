@@ -2,7 +2,7 @@
 
 Red-first companion to tests/test_sparse_mla_prefill_int8_adversarial.py: the
 native CUDA sparse-MLA decode gains an int8_ds_mla entry point
-(``flash_mla.sparse_int8_mla_decode`` -> ``torch.ops.flash_mla.fwd_sparse_int8_decode_mla``)
+(``flash_mla.sparse_mla_decode_int8`` -> ``torch.ops.flash_mla.fwd_sparse_int8_decode_mla``)
 that routes the selection through the H1 selection-scratch dequant pre-pass
 (int8 * fp32 rowwise scale -> bf16 scratch) and the unchanged bf16 attention
 kernels. Row format ground truth is the vLLM fork's int8 writer
@@ -34,9 +34,9 @@ HEAD_DIM = 512
 
 
 def _native_int8_decode():
-    from flash_mla.int8_sparse_mla import sparse_int8_mla_decode
+    from flash_mla.int8_sparse_mla import sparse_mla_decode_int8
 
-    return sparse_int8_mla_decode
+    return sparse_mla_decode_int8
 
 
 @pytest.mark.parametrize("layout", ["inline528", "separate"])
@@ -47,7 +47,7 @@ def test_int8_decode_adversarial_parity(layout, swa_topk, extra_topk, T):
     oracle and vs the Triton int8 decode, topk totals 512 and 1024."""
     if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
         pytest.skip("requires Ampere")
-    from flash_mla import triton_sparse_int8_mla_decode
+    from flash_mla import sparse_mla_decode_int8_triton
 
     decode = _native_int8_decode()
 
@@ -95,7 +95,7 @@ def test_int8_decode_adversarial_parity(layout, swa_topk, extra_topk, T):
     )
     torch.testing.assert_close(out.float(), O_ref, rtol=2e-2, atol=2e-2)
 
-    tri = triton_sparse_int8_mla_decode(
+    tri = sparse_mla_decode_int8_triton(
         q,
         swa_cache,
         swa_scale,

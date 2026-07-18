@@ -243,10 +243,3 @@ def sparse_mla_prefill(
         extra_indices,
         extra_lens,
     )
-
-
-# Deprecated aliases (pre-harmonization names; the appmana kernel-config
-# symbols are now role-named: sparse_mla_prefill / sparse_mla_decode_fp8 /
-# sparse_mla_decode_int8). Kept importable for older configs and callers.
-flash_sparse_mla_decode = sparse_mla_decode_fp8
-flash_sparse_mla_prefill = sparse_mla_prefill

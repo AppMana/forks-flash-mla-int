@@ -2,7 +2,7 @@
 
 Builds a realistic fp8_ds_mla cache (the exact DSV4 byte layout), random top-k slot
 indices, computes the fp32 reference (absorbed MLA: V == K, head_dim 512), and asserts
-the CUDA kernel `flash_sparse_mla_decode` matches.
+the CUDA kernel `sparse_mla_decode_fp8` matches.
 
 RED until the kernel + binding exist. Run:
   CUDA_VISIBLE_DEVICES=1 python -m pytest tests/test_sparse_mla_decode_sm86.py -x -q
@@ -77,7 +77,7 @@ def _fp32_ref(q, K_by_slot, indices, lens, scale, attn_sink):
 def test_sparse_mla_decode_parity(H, topk):
     if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
         pytest.skip("sm_86 sparse-MLA decode kernel requires Ampere (capability 8.x)")
-    from flash_mla import flash_sparse_mla_decode
+    from flash_mla import sparse_mla_decode_fp8
 
     torch.manual_seed(0)
     dev = "cuda"
@@ -99,7 +99,7 @@ def test_sparse_mla_decode_parity(H, topk):
     attn_sink = torch.randn(H, device=dev, dtype=torch.float32) * 0.1
 
     O_ref = _fp32_ref(q, K_by_slot, indices, lens, scale, attn_sink)
-    out = flash_sparse_mla_decode(
+    out = sparse_mla_decode_fp8(
         q=q, swa_cache=swa_cache, swa_indices=indices, swa_lens=lens,
         scale=scale, attn_sink=attn_sink,
     )
@@ -122,7 +122,7 @@ def test_sparse_mla_decode_two_stream(H, s_q):
     """swa + extra streams (different block sizes), attn_sink, multi-token (MTP)."""
     if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
         pytest.skip("requires Ampere (capability 8.x)")
-    from flash_mla import flash_sparse_mla_decode
+    from flash_mla import sparse_mla_decode_fp8
 
     torch.manual_seed(1)
     dev = "cuda"
@@ -152,7 +152,7 @@ def test_sparse_mla_decode_two_stream(H, s_q):
         ex = torch.exp(sc - mx)
         O_ref[t] = (ex @ K) / (ex.sum(-1, keepdim=True) + torch.exp(sink - mx))
 
-    out = flash_sparse_mla_decode(
+    out = sparse_mla_decode_fp8(
         q=q, swa_cache=swa_cache, swa_indices=swa_idx, swa_lens=swa_lens,
         scale=scale, attn_sink=attn_sink,
         extra_cache=extra_cache, extra_indices=extra_idx, extra_lens=extra_lens,
@@ -168,7 +168,7 @@ def test_sparse_mla_prefill_parity(H, T):
     fast path (direct in-kernel normalize + sink, no split-KV partials/combine)."""
     if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
         pytest.skip("requires Ampere (capability 8.x)")
-    from flash_mla import flash_sparse_mla_prefill
+    from flash_mla import sparse_mla_prefill
 
     torch.manual_seed(3)
     dev = "cuda"
@@ -187,7 +187,7 @@ def test_sparse_mla_prefill_parity(H, T):
     attn_sink = torch.randn(H, device=dev, dtype=torch.float32) * 0.1
 
     O_ref = _fp32_ref(q, K_by_slot, indices, lens, scale, attn_sink)
-    out = flash_sparse_mla_prefill(
+    out = sparse_mla_prefill(
         q=q, swa_cache=swa_cache, swa_indices=indices, swa_lens=lens,
         scale=scale, attn_sink=attn_sink,
     )
@@ -206,7 +206,7 @@ def test_sparse_mla_prefill_two_stream_parity(H, T):
     """
     if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
         pytest.skip("requires Ampere (capability 8.x)")
-    from flash_mla import flash_sparse_mla_prefill
+    from flash_mla import sparse_mla_prefill
 
     torch.manual_seed(4)
     dev = "cuda"
@@ -235,7 +235,7 @@ def test_sparse_mla_prefill_two_stream_parity(H, T):
         ex = torch.exp(sc - mx)
         O_ref[t] = (ex @ K) / (ex.sum(-1, keepdim=True) + torch.exp(sink - mx))
 
-    out = flash_sparse_mla_prefill(
+    out = sparse_mla_prefill(
         q=q, swa_cache=swa_cache, swa_indices=swa_idx, swa_lens=swa_lens,
         scale=scale, attn_sink=attn_sink,
         extra_cache=extra_cache, extra_indices=extra_idx, extra_lens=extra_lens,
@@ -255,7 +255,7 @@ def test_sparse_mla_decode_real_serving_shapes(T, extra_topk):
     """
     if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
         pytest.skip("requires Ampere (capability 8.x)")
-    from flash_mla import flash_sparse_mla_decode
+    from flash_mla import sparse_mla_decode_fp8
 
     torch.manual_seed(10 + T + extra_topk)
     dev = "cuda"
@@ -286,7 +286,7 @@ def test_sparse_mla_decode_real_serving_shapes(T, extra_topk):
         ex = torch.exp(sc - mx)
         O_ref[t] = (ex @ K) / (ex.sum(-1, keepdim=True) + torch.exp(sink - mx))
 
-    out = flash_sparse_mla_decode(
+    out = sparse_mla_decode_fp8(
         q=q,
         swa_cache=swa_cache,
         swa_indices=swa_idx,
@@ -306,7 +306,7 @@ def test_sparse_mla_prefill_real_serving_two_stream_shape(T):
     """Live prefill shape with direct paged fp8 caches, not gathered bf16 KV."""
     if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
         pytest.skip("requires Ampere (capability 8.x)")
-    from flash_mla import flash_sparse_mla_prefill
+    from flash_mla import sparse_mla_prefill
 
     torch.manual_seed(20 + T)
     dev = "cuda"
@@ -336,7 +336,7 @@ def test_sparse_mla_prefill_real_serving_two_stream_shape(T):
         ex = torch.exp(sc - mx)
         O_ref[out_i] = (ex @ K) / (ex.sum(-1, keepdim=True) + torch.exp(sink - mx))
 
-    out = flash_sparse_mla_prefill(
+    out = sparse_mla_prefill(
         q=q,
         swa_cache=swa_cache,
         swa_indices=swa_idx.unsqueeze(1),
