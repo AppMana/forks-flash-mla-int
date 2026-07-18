@@ -330,7 +330,7 @@ except Exception as _:
 
 setup(
     name="flash_mla",
-    version="1.0.0" + rev,
+    version="2.0.0" + rev,
     packages=find_packages(include=['flash_mla']),
     ext_modules=ext_modules,
     cmdclass={"build_ext": BuildExtension},
