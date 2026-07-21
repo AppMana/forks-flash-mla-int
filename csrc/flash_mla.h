@@ -133,7 +133,8 @@ struct Sparse_mla_prefill_params {
     int64_t q_token_stride, q_head_stride;
     void *o_ptr;                       // bf16 [T, H, 512]
     int64_t out_token_stride, out_head_stride;
-    void *kv_ptr;                      // bf16 [T, width, 512]
+    void *kv_ptr;                      // fp8 path: bf16 [total_slots, 512] whole-cache
+                                       // dequant buffer; nullptr on int8 (in-kernel dequant)
     const float *attn_sink_ptr;        // [H] or nullptr
     const void *swa_cache_ptr;         // fp8 uint8 [nb, bs, 584] or int8 [nb, bs, 512]
     const float *swa_scale_ptr;        // int8 [nb, bs] or nullptr for fp8
@@ -151,8 +152,10 @@ struct Sparse_mla_prefill_params {
 };
 
 // Fused tensor-core sparse-MLA prefill. Handles BOTH fp8_ds_mla and int8_ds_mla
-// caches (params.int8_cache selects the dequant path). kv_ptr is the
+// caches (params.int8_cache selects the dequant path). fp8: kv_ptr is the
 // [total_slots, 512] bf16 whole-cache dequant buffer, sized by the binding.
+// int8: NO pre-pass and no pool-sized buffer — raw int8 rows are gathered and
+// dequantized in-kernel (kv_ptr must be nullptr).
 void run_sparse_mla_prefill(Sparse_mla_prefill_params &params,
                             cudaStream_t stream);
 

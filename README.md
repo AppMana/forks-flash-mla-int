@@ -38,7 +38,7 @@ but ~4x slower. The removal stands on the dead-code + performance grounds regard
 | Stage | Kernel path |
 | --- | --- |
 | Decode sparse MLA | `flash_mla.flash_sparse_mla_decode` (fused, heads-as-M mma) |
-| Prefill sparse MLA | `flash_mla.flash_sparse_mla_prefill` (fused, whole-cache dequant) |
+| Prefill sparse MLA | `flash_mla.flash_sparse_mla_prefill` (fused; fp8: whole-cache dequant pre-pass, int8: in-kernel dequant) |
 
 Both take the KV row stride as a runtime argument and accept `fp8_ds_mla` and
 `int8_ds_mla` caches (the int8 layout is 512 int8 payload + fp32 scale at byte
@@ -65,6 +65,17 @@ granularity: it dequantizes the *whole cache* once (3% of the op) because every
 row is reused ~32-64x within a chunk, whereas decode dequantizes only the
 selected rows because T=1 has no reuse to amortize. Running the prefill kernel
 at T=1 costs 530 us (SM starvation) — the two are not interchangeable.
+
+The whole-cache pre-pass is now **fp8-only**. Its bf16 buffer is 2 KiB per pool
+slot — 2.25 GiB per call at the production 2.3M-slot pool — which OOM'd 24GB
+ranks. The int8 prefill instead gathers raw int8 rows (half the random-gather
+bytes) and dequantizes int8\*scale in smem between the cp.async wait and the QK
+mma; unlike the fp8 cvt chain this is one cvt+mul per element. Bit-exact vs the
+retired pre-pass path. At the production geometry (2.3M-slot pool, T=1024,
+top-k 2048) this is 23% faster (16.7 -> 12.8 ms) with a 64 MiB peak op
+footprint (was 2.31 GiB); at a 16k-slot pool with T=256/width 1024 it is 20%
+slower (1.36 -> 1.64 ms) because the tiny pre-pass amortized perfectly there —
+accepted, long-context prefill is the binding regime.
 
 ### Benchmarking caveats (read before trusting a number)
 

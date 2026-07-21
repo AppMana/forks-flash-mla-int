@@ -1,6 +1,6 @@
-// Ampere (sm_86) fused sparse-MLA prefill (DeepSeek-V4-Flash absorbed form, fp8_ds_mla cache).
+// Ampere (sm_86) fused sparse-MLA prefill (DeepSeek-V4-Flash absorbed form).
 //
-// Two phases, one op:
+// fp8_ds_mla cache — two phases, one op:
 //   1. dequant pass: the WHOLE paged fp8 cache is dequantized once into a dense bf16
 //      row buffer [total_slots, 512]. At prefill every cached slot is selected ~T*topk/
 //      context times per chunk, so per-(token,slot) in-kernel fp8 decode is massively
@@ -12,6 +12,17 @@
 //      QK/PV run on mma.sync.m16n8k16 across all 8 warps (QK is 2-way k-split so every
 //      warp contributes), online softmax per head row, attn_sink merged once, direct
 //      output write.
+//
+// int8_ds_mla cache — single phase, in-kernel dequant (INT8_GATHER=true):
+//   the whole-cache pre-pass is GONE (its [total_slots, 512] bf16 buffer was 2 KiB per
+//   pool slot — 2.23 GiB at the production 2.3M-slot pool — allocated per call and it
+//   OOM'd 24GB ranks). int8 rows are gathered raw with cp.async into an int8 smem
+//   staging ring (HALF the random-gather bytes of the bf16 ring), then dequantized
+//   int8*scale -> bf16 into the mma ring in smem. Unlike the fp8 cvt chain that
+//   motivated the pre-pass, int8 dequant is one cvt+mul per element and the convert
+//   sits between the cp.async wait and the QK mma of a 16-row tile — noise next to
+//   the tile's 32x16x512 QK/PV work. Numerics are IDENTICAL to the pre-pass
+//   (same (float)v * scale -> bf16 rounding per element).
 
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
@@ -19,6 +30,8 @@
 #include <cuda_runtime.h>
 #include <math.h>
 #include <stdint.h>
+
+#include <type_traits>
 
 #include "flash_mla.h"
 
@@ -72,46 +85,7 @@ __global__ void dequant_cache_kernel(Sparse_mla_prefill_params p, int swa_slots,
     }
 }
 
-// int8_ds_mla variant: 512 int8 payload bytes (rope dims quantized like the rest)
-// + one fp32 rowwise scale, addressed ONLY through the runtime strides in params
-// (the vLLM fork's token stride is currently 528 = 512 + 4 scale + 12 pad, but the
-// separate-tensor legacy layout with a 512 stride must keep working). Dequant is
-// bf16 = int8 * scale.
-__global__ void dequant_cache_int8_kernel(Sparse_mla_prefill_params p, int swa_slots,
-                                          int total_slots) {
-    const int8_t *swa_cache = reinterpret_cast<const int8_t *>(p.swa_cache_ptr);
-    const int8_t *extra_cache = reinterpret_cast<const int8_t *>(p.extra_cache_ptr);
-    __nv_bfloat16 *kv = reinterpret_cast<__nv_bfloat16 *>(p.kv_ptr);
-    int64_t total = (int64_t)total_slots * (HEAD_DIM / 4);
-    for (int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x; i < total;
-         i += (int64_t)blockDim.x * gridDim.x) {
-        int s = (int)(i >> 7);
-        int d = ((int)i & 127) * 4;
-        bool is_ex = s >= swa_slots;
-        int local = is_ex ? s - swa_slots : s;
-        const int8_t *cache = is_ex ? extra_cache : swa_cache;
-        int64_t bstride = is_ex ? p.extra_block_stride : p.swa_block_stride;
-        int64_t pstride = is_ex ? p.extra_pos_stride : p.swa_pos_stride;
-        const float *scale_base = is_ex ? p.extra_scale_ptr : p.swa_scale_ptr;
-        int64_t sbstride = is_ex ? p.extra_scale_block_stride : p.swa_scale_block_stride;
-        int64_t spstride = is_ex ? p.extra_scale_pos_stride : p.swa_scale_pos_stride;
-        int bsize = is_ex ? p.extra_block_size : p.swa_block_size;
-        int b = local / bsize, pos = local - b * bsize;
-        const int8_t *row = cache + (int64_t)b * bstride + (int64_t)pos * pstride;
-        const float sc = scale_base[(int64_t)b * sbstride + (int64_t)pos * spstride];
-        char4 v = *reinterpret_cast<const char4 *>(row + d);
-        __nv_bfloat162 o0 = __nv_bfloat162(__float2bfloat16((float)v.x * sc),
-                                           __float2bfloat16((float)v.y * sc));
-        __nv_bfloat162 o1 = __nv_bfloat162(__float2bfloat16((float)v.z * sc),
-                                           __float2bfloat16((float)v.w * sc));
-        __nv_bfloat162 *dst =
-            reinterpret_cast<__nv_bfloat162 *>(kv + (int64_t)s * HEAD_DIM + d);
-        dst[0] = o0;
-        dst[1] = o1;
-    }
-}
-
-// ---------------- phase 2: gather-bf16 tensor-core attention ----------------
+// ---------------- phase 2: gather tensor-core attention ----------------
 
 constexpr int BLOCK_M = 32;   // heads per CTA (2 CTAs cover H=64)
 constexpr int BLOCK_N = 16;   // selected slots per ring slot
@@ -151,8 +125,8 @@ __device__ __forceinline__ void mma16816(float c[4], const uint32_t a[4], const 
 
 struct Smem {
     __nv_bfloat16 q_s[BLOCK_M][LD];          // 33.3 KB
-    __nv_bfloat16 k_s[2][BLOCK_N][LD];       // 33.3 KB gather ring (cp.async lands here)
-    const __nv_bfloat16 *src_row_s[2][BLOCK_N];
+    __nv_bfloat16 k_s[2][BLOCK_N][LD];       // 33.3 KB gather ring (mma reads here)
+    const void *src_row_s[2][BLOCK_N];       // bf16 row (fp8 path) or raw int8 row
     __nv_bfloat16 p_s[BLOCK_M][BLOCK_N + 8]; // softmax probs (padded rows)
     float qk_red[2][2][32][4];               // k-split partial C exchange [wm][wn][lane][4]
     // max and sum exchanges are SEPARATE buffers: the sum write happens in the same
@@ -163,11 +137,23 @@ struct Smem {
     float inv_s[BLOCK_M];
 };
 
+// int8 gather mode: raw int8 rows land here via cp.async, then get dequantized
+// into k_s. scale8_s holds the fp32 rowwise scale (0 for invalid/pad rows, which
+// makes the dequant of never-written staging bytes an exact zero row).
+struct SmemInt8 : Smem {
+    int8_t k8_s[2][BLOCK_N][HEAD_DIM];       // 16 KB int8 staging ring
+    float scale8_s[2][BLOCK_N];
+};
+static_assert(sizeof(Smem) % 16 == 0, "k8_s must stay 16B-aligned for cp.async");
+static_assert(sizeof(SmemInt8) <= 100 * 1024, "sm_86 dynamic smem budget");
+
+template <bool INT8_GATHER>
 __global__ void __launch_bounds__(NTHREADS)
 sparse_prefill_fused_mma_kernel(__grid_constant__ const Sparse_mla_prefill_params p,
                                 const int swa_slots, const int total_slots) {
     extern __shared__ char smem_raw[];
-    Smem &s = *reinterpret_cast<Smem *>(smem_raw);
+    using SmemT = std::conditional_t<INT8_GATHER, SmemInt8, Smem>;
+    SmemT &s = *reinterpret_cast<SmemT *>(smem_raw);
     // grid is (head_blocks, T): blockIdx.x varies fastest, so the two head-block CTAs
     // of one token are ADJACENT in issue order and the second hits L2 for the gather
     const int t = blockIdx.y;
@@ -218,35 +204,70 @@ sparse_prefill_fused_mma_kernel(__grid_constant__ const Sparse_mla_prefill_param
     const int n_tiles = (len + BLOCK_N - 1) / BLOCK_N;
     const __nv_bfloat16 *kv = reinterpret_cast<const __nv_bfloat16 *>(p.kv_ptr);
 
-    // map concatenated selection g -> dense bf16 row pointer (nullptr = zero row)
+    // map concatenated selection g -> source row pointer (nullptr = zero row):
+    // dense bf16 row (fp8 path, whole-cache dequant buffer) or raw int8 cache row
+    // plus its fp32 rowwise scale (int8 path).
     auto resolve = [&](int tile) {
         if (tid < BLOCK_N) {
             int g = tile * BLOCK_N + tid;
-            const __nv_bfloat16 *src = nullptr;
+            const void *src = nullptr;
+            float sc = 0.f;
             if (g < len) {
                 bool is_ex = g >= swa_len;
                 int sidx = is_ex ? p.extra_indices_ptr[(int64_t)t * p.extra_topk + (g - swa_len)]
                                  : p.swa_indices_ptr[(int64_t)t * p.swa_topk + g];
                 int nslots = is_ex ? total_slots - swa_slots : swa_slots;
                 if (sidx >= 0 && sidx < nslots) {
-                    src = kv + ((int64_t)(is_ex ? swa_slots + sidx : sidx)) * HEAD_DIM;
+                    if constexpr (INT8_GATHER) {
+                        const int8_t *cache = reinterpret_cast<const int8_t *>(
+                            is_ex ? p.extra_cache_ptr : p.swa_cache_ptr);
+                        int64_t bstride = is_ex ? p.extra_block_stride : p.swa_block_stride;
+                        int64_t pstride = is_ex ? p.extra_pos_stride : p.swa_pos_stride;
+                        const float *scale_base = is_ex ? p.extra_scale_ptr : p.swa_scale_ptr;
+                        int64_t sbstride =
+                            is_ex ? p.extra_scale_block_stride : p.swa_scale_block_stride;
+                        int64_t spstride =
+                            is_ex ? p.extra_scale_pos_stride : p.swa_scale_pos_stride;
+                        int bsize = is_ex ? p.extra_block_size : p.swa_block_size;
+                        int b = sidx / bsize, pos = sidx - b * bsize;
+                        src = cache + (int64_t)b * bstride + (int64_t)pos * pstride;
+                        sc = scale_base[(int64_t)b * sbstride + (int64_t)pos * spstride];
+                    } else {
+                        src = kv + ((int64_t)(is_ex ? swa_slots + sidx : sidx)) * HEAD_DIM;
+                    }
                 }
             }
             s.src_row_s[tile & 1][tid] = src;
+            if constexpr (INT8_GATHER) s.scale8_s[tile & 1][tid] = sc;
         }
     };
 
-    // cp.async the tile's bf16 rows into the ring (zero-fill invalid/pad rows)
+    // cp.async the tile's rows into the ring. fp8 path: bf16 rows straight into the
+    // mma ring (zero-fill invalid/pad rows). int8 path: raw int8 rows into the
+    // staging ring (invalid/pad rows are left untouched — their scale of 0 makes the
+    // dequant an exact zero row).
     auto issue_copies = [&](int tile) {
         int buf = tile & 1;
+        if constexpr (INT8_GATHER) {
+#pragma unroll 2
+            for (int vp = tid; vp < BLOCK_N * (HEAD_DIM / 16); vp += NTHREADS) {
+                int n = vp >> 5, c = (vp & 31) * 16;  // 16 int8 = 16B per chunk
+                const int8_t *src = reinterpret_cast<const int8_t *>(s.src_row_s[buf][n]);
+                if (src != nullptr) {
+                    __pipeline_memcpy_async(&s.k8_s[buf][n][c], src + c, 16);
+                }
+            }
+        } else {
 #pragma unroll 4
-        for (int vp = tid; vp < BLOCK_N * ROW_CHUNKS; vp += NTHREADS) {
-            int n = vp >> 6, c = (vp & 63) * 8;  // 8 bf16 = 16B per chunk
-            const __nv_bfloat16 *src = s.src_row_s[buf][n];
-            if (src != nullptr) {
-                __pipeline_memcpy_async(&s.k_s[buf][n][c], src + c, 16);
-            } else {
-                *reinterpret_cast<uint4 *>(&s.k_s[buf][n][c]) = uint4{0, 0, 0, 0};
+            for (int vp = tid; vp < BLOCK_N * ROW_CHUNKS; vp += NTHREADS) {
+                int n = vp >> 6, c = (vp & 63) * 8;  // 8 bf16 = 16B per chunk
+                const __nv_bfloat16 *src =
+                    reinterpret_cast<const __nv_bfloat16 *>(s.src_row_s[buf][n]);
+                if (src != nullptr) {
+                    __pipeline_memcpy_async(&s.k_s[buf][n][c], src + c, 16);
+                } else {
+                    *reinterpret_cast<uint4 *>(&s.k_s[buf][n][c]) = uint4{0, 0, 0, 0};
+                }
             }
         }
         __pipeline_commit();
@@ -263,8 +284,24 @@ sparse_prefill_fused_mma_kernel(__grid_constant__ const Sparse_mla_prefill_param
         const int n_valid = min(BLOCK_N, len - i * BLOCK_N);
         __pipeline_wait_prior(0);
         __syncthreads();  // ring[buf] ready for all; p_s/qk_red from prev tile consumed
+        if constexpr (INT8_GATHER) {
+            // dequant staging[buf] -> mma ring[buf]: bf16 = (float)int8 * rowwise scale,
+            // identical rounding to the retired whole-cache pre-pass. Rows whose staging
+            // bytes were never written carry scale 0 -> exact zero row.
+#pragma unroll
+            for (int e = tid; e < BLOCK_N * (HEAD_DIM / 4); e += NTHREADS) {
+                int n = e >> 7, c = (e & 127) * 4;
+                const float sc = s.scale8_s[buf][n];
+                char4 v = *reinterpret_cast<const char4 *>(&s.k8_s[buf][n][c]);
+                __nv_bfloat162 *dst = reinterpret_cast<__nv_bfloat162 *>(&s.k_s[buf][n][c]);
+                dst[0] = __nv_bfloat162(__float2bfloat16((float)v.x * sc),
+                                        __float2bfloat16((float)v.y * sc));
+                dst[1] = __nv_bfloat162(__float2bfloat16((float)v.z * sc),
+                                        __float2bfloat16((float)v.w * sc));
+            }
+        }
         if (i + 1 < n_tiles) resolve(i + 1);
-        __syncthreads();  // src ptrs visible (and resolve doesn't race issue below)
+        __syncthreads();  // src ptrs + dequanted ring[buf] visible (and resolve doesn't race issue below)
         if (i + 1 < n_tiles) issue_copies(i + 1);  // overlaps all math below
 
         // ---- QK: warp (wm, wn, wk) computes partial m16 x n8 over k half wk ----
@@ -417,11 +454,13 @@ sparse_prefill_fused_mma_kernel(__grid_constant__ const Sparse_mla_prefill_param
 
 }  // namespace
 
-// Fused tensor-core prefill: dequantize the whole selected cache once into a dense
-// bf16 [total_slots, 512] buffer, then run a gather-bf16 mma.m16n8k16 attention
-// kernel. Handles both fp8_ds_mla and int8_ds_mla caches. This is the only sparse
-// prefill path -- the legacy staged two-kernel gather path was removed (dead code,
-// unreachable in production, ~4x slower at the true 16k footprint).
+// Fused tensor-core prefill. fp8_ds_mla: dequantize the whole cache once into a
+// dense bf16 [total_slots, 512] buffer, then run the gather-bf16 mma.m16n8k16
+// attention kernel. int8_ds_mla: NO pre-pass and NO pool-sized buffer — the same
+// attention kernel gathers raw int8 rows and dequantizes them in smem
+// (INT8_GATHER=true). This is the only sparse prefill path -- the legacy staged
+// two-kernel gather path was removed (dead code, unreachable in production,
+// ~4x slower at the true 16k footprint).
 void run_sparse_mla_prefill(Sparse_mla_prefill_params &params,
                             cudaStream_t stream) {
     const int swa_slots = params.swa_num_blocks * params.swa_block_size;
@@ -429,14 +468,21 @@ void run_sparse_mla_prefill(Sparse_mla_prefill_params &params,
         ? params.extra_num_blocks * params.extra_block_size : 0;
     const int total_slots = swa_slots + extra_slots;
 
+    dim3 grid((params.num_heads + BLOCK_M - 1) / BLOCK_M, params.num_tokens);
     if (params.int8_cache) {
-        int64_t work = (int64_t)total_slots * (HEAD_DIM / 4);
-        int threads = 256;
-        int64_t blocks64 = (work + threads - 1) / threads;
-        int blocks = blocks64 > 4096 ? 4096 : (int)blocks64;
-        dequant_cache_int8_kernel<<<blocks, threads, 0, stream>>>(params, swa_slots,
-                                                                  total_slots);
-    } else {
+        int smem = (int)sizeof(SmemInt8);
+        static bool attr_set_int8 = false;
+        if (!attr_set_int8) {
+            cudaFuncSetAttribute(sparse_prefill_fused_mma_kernel<true>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+            attr_set_int8 = true;
+        }
+        sparse_prefill_fused_mma_kernel<true><<<grid, NTHREADS, smem, stream>>>(
+            params, swa_slots, total_slots);
+        return;
+    }
+
+    {
         int64_t work = (int64_t)total_slots * (HEAD_DIM / 2);
         int threads = 256;
         int64_t blocks64 = (work + threads - 1) / threads;
@@ -444,14 +490,13 @@ void run_sparse_mla_prefill(Sparse_mla_prefill_params &params,
         dequant_cache_kernel<<<blocks, threads, 0, stream>>>(params, swa_slots, total_slots);
     }
 
-    dim3 grid((params.num_heads + BLOCK_M - 1) / BLOCK_M, params.num_tokens);
     int smem = (int)sizeof(Smem);
     static bool attr_set = false;
     if (!attr_set) {
-        cudaFuncSetAttribute(sparse_prefill_fused_mma_kernel,
+        cudaFuncSetAttribute(sparse_prefill_fused_mma_kernel<false>,
                              cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
         attr_set = true;
     }
-    sparse_prefill_fused_mma_kernel<<<grid, NTHREADS, smem, stream>>>(params, swa_slots,
-                                                                      total_slots);
+    sparse_prefill_fused_mma_kernel<false><<<grid, NTHREADS, smem, stream>>>(
+        params, swa_slots, total_slots);
 }

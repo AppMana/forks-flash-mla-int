@@ -599,6 +599,10 @@ mha_fwd_sparse_int8_prefill_mla(
     STD_TORCH_CHECK(swa_indices.scalar_type() == ScalarType::Int, "swa_indices must be int32");
     STD_TORCH_CHECK(swa_lens.scalar_type() == ScalarType::Int, "swa_lens must be int32");
     CHECK_DEVICE(q); CHECK_DEVICE(swa_cache); CHECK_DEVICE(swa_scale); CHECK_DEVICE(swa_indices); CHECK_DEVICE(swa_lens);
+    // the kernel gathers raw int8 rows with 16-byte cp.async chunks
+    STD_TORCH_CHECK(swa_cache.stride(2) == 1, "swa_cache rows must be contiguous");
+    STD_TORCH_CHECK(swa_cache.stride(0) % 16 == 0 && swa_cache.stride(1) % 16 == 0,
+                    "swa_cache block/token strides must be 16-byte aligned");
 
     int swa_topk = swa_indices.size(1);
     int extra_topk = extra_indices.has_value() ? extra_indices.value().size(1) : 0;
@@ -607,11 +611,6 @@ mha_fwd_sparse_int8_prefill_mla(
 
     torch::stable::accelerator::DeviceGuard guard(device);
     Tensor out = torch::stable::new_empty(q, {T, H, D});
-    // fused path: whole-cache bf16 dequant buffer
-    int64_t total_slots = swa_cache.size(0) * swa_cache.size(1)
-        + (extra_cache.has_value()
-               ? extra_cache.value().size(0) * extra_cache.value().size(1) : (int64_t)0);
-    Tensor kv = torch::stable::new_empty(q, {total_slots, D});
 
     Sparse_mla_prefill_params p = {};
     p.num_tokens = T;
@@ -628,7 +627,7 @@ mha_fwd_sparse_int8_prefill_mla(
     p.o_ptr = out.data_ptr();
     p.out_token_stride = out.stride(0);
     p.out_head_stride = out.stride(1);
-    p.kv_ptr = kv.data_ptr();
+    p.kv_ptr = nullptr;  // int8 path dequantizes in-kernel: no whole-cache buffer
     p.attn_sink_ptr = attn_sink.has_value()
         ? reinterpret_cast<const float *>(attn_sink.value().data_ptr()) : nullptr;
     p.swa_cache_ptr = swa_cache.data_ptr();
@@ -644,6 +643,9 @@ mha_fwd_sparse_int8_prefill_mla(
                         "extra scale/indices/lens required with extra cache");
         STD_TORCH_CHECK(extra_cache.value().scalar_type() == ScalarType::Char, "extra_cache must be int8");
         STD_TORCH_CHECK(extra_scale.value().scalar_type() == ScalarType::Float, "extra_scale must be float32");
+        STD_TORCH_CHECK(extra_cache.value().stride(2) == 1, "extra_cache rows must be contiguous");
+        STD_TORCH_CHECK(extra_cache.value().stride(0) % 16 == 0 && extra_cache.value().stride(1) % 16 == 0,
+                        "extra_cache block/token strides must be 16-byte aligned");
         p.extra_cache_ptr = extra_cache.value().data_ptr();
         p.extra_scale_ptr = reinterpret_cast<const float *>(extra_scale.value().data_ptr());
         p.extra_block_stride = extra_cache.value().stride(0);

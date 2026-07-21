@@ -356,8 +356,12 @@ def sparse_mla_prefill_int8(
 ) -> torch.Tensor:
     """Native fused int8_ds_mla sparse-MLA prefill (Ampere sm_86).
 
-    Same fused tensor-core kernel as the fp8 prefill, taking int8 rows plus per-token
-    scales. The legacy staged path was removed; this is the sole int8 prefill kernel.
+    Same fused tensor-core attention kernel as the fp8 prefill, taking int8 rows plus
+    per-token scales, but WITHOUT the fp8 path's whole-cache bf16 dequant pre-pass:
+    int8 rows are gathered raw and dequantized in-kernel, so the op allocates nothing
+    sized by the KV pool (the pre-pass buffer was 2 KiB/slot and OOM'd 24GB ranks at
+    production pool sizes). The legacy staged path was removed; this is the sole int8
+    prefill kernel.
     """
     if q.shape[-1] != HEAD_DIM:
         raise ValueError(f"expected q head dim {HEAD_DIM}, got {q.shape[-1]}")
