@@ -191,6 +191,10 @@ jobs:
   # Same build as the x86_64 manylinux job, on an arm64 runner. Needed for the
   # DGX Spark (GB10): its CPU is Grace (aarch64), so an x86_64 wheel cannot be
   # installed there at all, regardless of which SASS it carries.
+  #
+  # The builder image is `manylinuxaarch64-builder` -- note the naming differs
+  # from the x86_64 job's `manylinux2_28-builder`, and that image is a
+  # linux/amd64-only manifest, so it cannot simply be reused here.
   manylinux-wheel-aarch64:
     name: Wheel (manylinux_2_28, aarch64)
     runs-on: ubuntu-24.04-arm
@@ -216,7 +220,7 @@ jobs:
           set -euo pipefail
           docker run --rm -v "$PWD":/io -w /io \
             -e FLASH_MLA_CUDA_ARCHS="${FLASH_MLA_CUDA_ARCHS}" \
-            pytorch/manylinux2_28_aarch64-builder:cuda13.0 bash -c '
+            pytorch/manylinuxaarch64-builder:cuda13.0 bash -c '
             set -euo pipefail
             export PATH=/opt/python/cp312-cp312/bin:$PATH
             python -m pip install -q -U pip uv
