@@ -215,11 +215,19 @@ jobs:
         with:
           submodules: recursive
 
+      # The hosted arm64 runner is 4 cores / 16 GB and was OOM-killed ~50 min in
+      # ("lost communication with the server", no logs uploaded) building the
+      # full 7-gencode matrix. Narrow it: no aarch64 NVIDIA host ships an
+      # sm_80/86/89/120 GPU, so this wheel only needs Grace-class parts --
+      # sm_90 (GH200), sm_100 (GB200) and sm_121 (GB10/DGX Spark). Serialize
+      # nvcc too; wall-clock matters less than finishing.
       - name: Build + repair manylinux_2_28 aarch64 wheel in the pytorch cuda13 builder
+        env:
+          FLASH_MLA_CUDA_ARCHS_AARCH64: "90,100,121"
         run: |
           set -euo pipefail
           docker run --rm -v "$PWD":/io -w /io \
-            -e FLASH_MLA_CUDA_ARCHS="${FLASH_MLA_CUDA_ARCHS}" \
+            -e FLASH_MLA_CUDA_ARCHS="${FLASH_MLA_CUDA_ARCHS_AARCH64}" \
             pytorch/manylinuxaarch64-builder:cuda13.0 bash -c '
             set -euo pipefail
             export PATH=/opt/python/cp312-cp312/bin:$PATH
@@ -227,7 +235,7 @@ jobs:
             uv pip install --system -q packaging setuptools wheel numpy ninja
             uv pip install --system -q --index-url https://download.pytorch.org/whl/'"${CUDA_INDEX}"' torch=='"${TORCH_VERSION}"'
             rm -rf build dist dist_manylinux
-            FLASH_MLA_DISABLE_FP16=TRUE MAX_JOBS=2 NVCC_THREADS=2 python setup.py bdist_wheel
+            FLASH_MLA_DISABLE_FP16=TRUE MAX_JOBS=1 NVCC_THREADS=1 python setup.py bdist_wheel
             uv pip install --system -q auditwheel
             auditwheel repair dist/*.whl --plat manylinux_2_28_aarch64 \
               --exclude "libtorch*.so*" --exclude "libc10*.so*" --exclude "libcudart*.so*" \
