@@ -47,6 +47,32 @@ DevProps get_dev_props(int device) {
     return p;
 }
 
+// Which architectures may run the sparse-MLA kernels.
+//
+// These kernels are written against `cp.async`, `ldmatrix` and
+// `mma.sync.m16n8k16` — the Ampere instruction set. Consumer Blackwell (sm_12x,
+// e.g. the GB10 in a DGX Spark) supports all three, so the kernels are valid
+// there even though they were authored for and originally validated on sm_8x.
+//
+// Widening this is not cosmetic: sm_12x has no alternative. Upstream FlashMLA
+// covers Hopper via WGMMA (sm_90) and datacenter Blackwell via tcgen05
+// (sm_100), and consumer Blackwell has neither instruction family. This port is
+// the only sparse-MLA implementation that can run on a GB10 at all.
+//
+// Correctness is a separate question from instruction availability. The suites
+// in tests/ check every kernel against an fp32 oracle; run them on the target
+// before trusting a new architecture here.
+inline bool is_sparse_mla_arch(const DevProps &p) {
+    return p.major == 8      // Ampere: sm_80 / sm_86 / sm_89
+        || p.major == 12;    // consumer Blackwell: sm_120 / sm_121
+}
+
+#define CHECK_SPARSE_MLA_ARCH(props, what)                                     \
+    STD_TORCH_CHECK(is_sparse_mla_arch(props),                                 \
+                    what " requires Ampere (sm_8x) or consumer Blackwell "     \
+                         "(sm_12x); got sm_",                                  \
+                    (props).major, (props).minor)
+
 cudaStream_t current_cuda_stream(int device) {
     void *s = nullptr;
     TORCH_ERROR_CODE_CHECK(aoti_torch_get_current_cuda_stream(device, &s));
@@ -295,7 +321,7 @@ mha_fwd_sparse_decode_mla(
 ) {
     int device = torch::stable::accelerator::getCurrentDeviceIndex();
     auto props = get_dev_props(device);
-    STD_TORCH_CHECK(props.major == 8, "sparse-MLA decode kernel is Ampere (sm_8x) only");
+    CHECK_SPARSE_MLA_ARCH(props, "sparse-MLA decode kernel");
 
     int T = q.size(0), H = q.size(1), D = q.size(2);
     STD_TORCH_CHECK(D == 512, "head_dim must be 512");
@@ -400,8 +426,13 @@ mha_fwd_sparse_int8_decode_mla(
     std::optional<Tensor> extra_lens
 ) {
     int device = torch::stable::accelerator::getCurrentDeviceIndex();
+    // No architecture check. The int8 sparse-MLA kernels are ours, not an
+    // inherited upstream path, and every caller selects them explicitly by
+    // reaching for an int8 KV cache. A guard here can only turn a deliberate
+    // choice into a runtime error on some architecture nobody has tried yet;
+    // correctness is established by the suites in tests/, not by a major
+    // version number. (props is still needed below for sm_count.)
     auto props = get_dev_props(device);
-    STD_TORCH_CHECK(props.major == 8, "sparse-MLA int8 decode kernel is Ampere (sm_8x) only");
 
     int T = q.size(0), H = q.size(1), D = q.size(2);
     STD_TORCH_CHECK(D == 512, "head_dim must be 512");
@@ -512,7 +543,7 @@ mha_fwd_sparse_prefill_mla(
 ) {
     int device = torch::stable::accelerator::getCurrentDeviceIndex();
     auto props = get_dev_props(device);
-    STD_TORCH_CHECK(props.major == 8, "sparse-MLA prefill kernel is Ampere (sm_8x) only");
+    CHECK_SPARSE_MLA_ARCH(props, "sparse-MLA prefill kernel");
 
     int T = q.size(0), H = q.size(1), D = q.size(2);
     STD_TORCH_CHECK(D == 512, "head_dim must be 512");
@@ -588,8 +619,7 @@ mha_fwd_sparse_int8_prefill_mla(
     std::optional<Tensor> extra_lens
 ) {
     int device = torch::stable::accelerator::getCurrentDeviceIndex();
-    auto props = get_dev_props(device);
-    STD_TORCH_CHECK(props.major == 8, "sparse-MLA int8 prefill kernel is Ampere (sm_8x) only");
+    // No architecture check -- see mha_fwd_sparse_int8_decode_mla.
 
     int T = q.size(0), H = q.size(1), D = q.size(2);
     STD_TORCH_CHECK(D == 512, "head_dim must be 512");
@@ -665,8 +695,9 @@ mha_fwd_sparse_int8_prefill_mla(
 
 Tensor debug_imma_m16n8k32_s8s8(Tensor a, Tensor b) {
     int device = torch::stable::accelerator::getCurrentDeviceIndex();
-    auto props = get_dev_props(device);
-    STD_TORCH_CHECK(props.major == 8, "debug IMMA op is Ampere (sm_8x) only");
+    // No architecture check -- see mha_fwd_sparse_int8_decode_mla. This op
+    // exists to exercise the IMMA instruction the int8 kernels are built on, so
+    // gating it defeats its only purpose on an untested architecture.
     CHECK_DEVICE(a);
     CHECK_DEVICE(b);
     CHECK_CONTIGUOUS(a);

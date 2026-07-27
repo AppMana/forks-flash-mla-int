@@ -145,7 +145,11 @@ struct SmemInt8 : Smem {
     float scale8_s[2][BLOCK_N];
 };
 static_assert(sizeof(Smem) % 16 == 0, "k8_s must stay 16B-aligned for cp.async");
-static_assert(sizeof(SmemInt8) <= 100 * 1024, "sm_86 dynamic smem budget");
+// sm_86 and sm_121 both report cudaDevAttrMaxSharedMemoryPerBlockOptin =
+// 101376 B (measured on an RTX A5000 and on a GB10), so this bound covers
+// consumer Blackwell unchanged — the int8 prefill path needed no resizing to
+// run on a DGX Spark.
+static_assert(sizeof(SmemInt8) <= 100 * 1024, "sm_86 / sm_121 dynamic smem budget");
 
 template <bool INT8_GATHER>
 __global__ void __launch_bounds__(NTHREADS)

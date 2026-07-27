@@ -1,14 +1,16 @@
 name: Build wheels (stable ABI, cp39-abi3)
 
-# Builds two Linux wheels for flash_mla, both cp39-abi3 + torch-stable (TORCH_STABLE_ONLY),
+# Builds three Linux wheels for flash_mla, all cp39-abi3 + torch-stable (TORCH_STABLE_ONLY),
 # so a single wheel works on any torch >= 2.9 built against CUDA 13.x:
 #   1. jammy        -> built on Ubuntu 22.04 (glibc 2.35).
 #   2. manylinux    -> built in manylinux_2_28 (glibc 2.28). Portable: runs on jammy,
 #                      noble, and anything with glibc >= 2.28.
+#   3. manylinux aarch64 -> the same, for arm64 hosts (DGX Spark / GB10, whose
+#                      Grace CPU cannot install an x86_64 wheel at all).
 #
-# FLASH_MLA_CUDA_ARCHS is the SASS matrix baked into both wheels. sm_80 is the floor
+# FLASH_MLA_CUDA_ARCHS is the SASS matrix baked into every wheel. sm_80 is the floor
 # (the Ampere kernels use cp.async / ldmatrix / mma.m16n8k16); the Hopper sources are
-# always additionally compiled for sm_90a. sm_100 / sm_120 require CUDA >= 12.8 --
+# always additionally compiled for sm_90a. sm_100 / sm_120 / sm_121 require CUDA >= 12.8 --
 # this workflow pins CUDA 13.0, so they are in range.
 
 on:
@@ -23,7 +25,12 @@ permissions:
 env:
   TORCH_VERSION: "2.11.0"
   CUDA_INDEX: "cu130"
-  FLASH_MLA_CUDA_ARCHS: "80,86,89,90,100,120"
+  # 121 is the DGX Spark GB10 (consumer Blackwell). The sparse kernels are
+  # Ampere-instruction (cp.async / ldmatrix / mma.m16n8k16), which sm_12x has,
+  # and it is the only sparse-MLA family that runs there at all — upstream
+  # covers Hopper via WGMMA and datacenter Blackwell via tcgen05, neither of
+  # which consumer Blackwell implements.
+  FLASH_MLA_CUDA_ARCHS: "80,86,89,90,100,120,121"
 
 jobs:
   release-meta:
@@ -180,11 +187,73 @@ jobs:
           path: dist_manylinux/*.whl
           if-no-files-found: error
 
+  # ------------------------------------------------- manylinux_2_28 aarch64 (glibc 2.28)
+  # Same build as the x86_64 manylinux job, on an arm64 runner. Needed for the
+  # DGX Spark (GB10): its CPU is Grace (aarch64), so an x86_64 wheel cannot be
+  # installed there at all, regardless of which SASS it carries.
+  manylinux-wheel-aarch64:
+    name: Wheel (manylinux_2_28, aarch64)
+    runs-on: ubuntu-24.04-arm
+    needs: release-meta
+    steps:
+      - name: Free runner disk (cuda13 manylinux builder is ~20GB)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build + repair manylinux_2_28 aarch64 wheel in the pytorch cuda13 builder
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD":/io -w /io \
+            -e FLASH_MLA_CUDA_ARCHS="${FLASH_MLA_CUDA_ARCHS}" \
+            pytorch/manylinux2_28_aarch64-builder:cuda13.0 bash -c '
+            set -euo pipefail
+            export PATH=/opt/python/cp312-cp312/bin:$PATH
+            python -m pip install -q -U pip uv
+            uv pip install --system -q packaging setuptools wheel numpy ninja
+            uv pip install --system -q --index-url https://download.pytorch.org/whl/'"${CUDA_INDEX}"' torch=='"${TORCH_VERSION}"'
+            rm -rf build dist dist_manylinux
+            FLASH_MLA_DISABLE_FP16=TRUE MAX_JOBS=2 NVCC_THREADS=2 python setup.py bdist_wheel
+            uv pip install --system -q auditwheel
+            auditwheel repair dist/*.whl --plat manylinux_2_28_aarch64 \
+              --exclude "libtorch*.so*" --exclude "libc10*.so*" --exclude "libcudart*.so*" \
+              --exclude "libcudnn*.so*" --exclude "libcublas*.so*" --exclude "libnvToolsExt*.so*" \
+              -w /io/dist_manylinux/
+          '
+          sudo chown -R "$(id -u):$(id -g)" dist_manylinux 2>/dev/null || true
+          ls -la dist_manylinux/*.whl
+
+      - name: Verify cp39-abi3 + manylinux aarch64 tag
+        run: |
+          set -euo pipefail
+          for whl in dist_manylinux/*.whl; do
+            case "$whl" in
+              *cp39-abi3*manylinux_2_28_aarch64*) echo "ok: $whl" ;;
+              *) echo "Unexpected wheel tag (want cp39-abi3 + manylinux_2_28_aarch64): $whl"; exit 1 ;;
+            esac
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flash_mla-manylinux_2_28_aarch64-${{ env.CUDA_INDEX }}
+          path: dist_manylinux/*.whl
+          if-no-files-found: error
+
   # ---------------------------------------------------------------- publish
   publish-release:
     name: Publish release
     runs-on: ubuntu-24.04
-    needs: [release-meta, jammy-wheel, manylinux-wheel]
+    needs: [release-meta, jammy-wheel, manylinux-wheel, manylinux-wheel-aarch64]
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -209,7 +278,7 @@ jobs:
   publish-simple-index:
     name: Publish gh-pages PEP 503 simple index
     runs-on: ubuntu-24.04
-    needs: [release-meta, jammy-wheel, manylinux-wheel, publish-release]
+    needs: [release-meta, jammy-wheel, manylinux-wheel, manylinux-wheel-aarch64, publish-release]
     steps:
       - uses: actions/download-artifact@v4
         with:

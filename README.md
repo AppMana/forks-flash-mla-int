@@ -23,10 +23,37 @@ ported from the Hopper WGMMA kernel, whose core instructions have no Ampere equi
 - Compute capability 8.0 or newer. The Ampere kernels use `cp.async`, `ldmatrix` and
   `mma.m16n8k16`, so `sm_80` is a hard floor.
 
-The sparse operators additionally check the device at call time and accept only compute
-capability 8.x; the dense operator accepts 8.x and 9.0.
+The sparse operators check the device at call time and accept compute capability **8.x
+(Ampere) and 12.x (consumer Blackwell)**; the dense operator accepts 8.x and 9.0.
+
+Consumer Blackwell — `sm_120`/`sm_121`, including the GB10 in a DGX Spark — runs the
+same kernels: it has all three Ampere instructions, and its
+`cudaDevAttrMaxSharedMemoryPerBlockOptin` is 101376 B, identical to `sm_86`, so the
+shared-memory budgets are unchanged. This is not merely convenient — it is the only
+sparse-MLA path available there, since upstream FlashMLA covers Hopper via WGMMA
+(`sm_90`) and datacenter Blackwell via tcgen05 (`sm_100`), and consumer Blackwell
+implements neither.
+
+Instruction availability is not numerical parity, so treat a new architecture as
+unvalidated until the `tests/` suites — which check every kernel against an fp32 oracle
+— pass on that hardware.
 
 ## Install
+
+### From the published index (recommended)
+
+CI publishes wheels to a PEP 503 simple index on this repo's `gh-pages` branch, so
+pip resolves the right one for your platform — x86_64 or aarch64, `manylinux_2_28`
+or jammy — without pinning a URL:
+
+```bash
+pip install flash-mla --extra-index-url https://appmana.github.io/forks-flash-mla-ampere-dsv4/
+```
+
+Every wheel is `cp39-abi3` and torch-stable, so one wheel works across torch >= 2.9
+built against CUDA 13.x. The SASS matrix baked in is `FLASH_MLA_CUDA_ARCHS` below.
+
+### From source
 
 ```bash
 pip install .
