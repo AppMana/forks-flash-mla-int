@@ -1,17 +1,19 @@
 name: Build wheels (stable ABI, cp39-abi3)
 
 # Builds two Linux wheels for flash_mla, both cp39-abi3 + torch-stable (TORCH_STABLE_ONLY),
-# so a single wheel works on any torch >= 2.9 with CUDA 13.x:
-#   1. jammy        -> built on Ubuntu 22.04 (glibc 2.35). Exact match for the current
-#                      DSV4 serving image (vllm-ampere, jammy/glibc 2.35).
+# so a single wheel works on any torch >= 2.9 built against CUDA 13.x:
+#   1. jammy        -> built on Ubuntu 22.04 (glibc 2.35).
 #   2. manylinux    -> built in manylinux_2_28 (glibc 2.28). Portable: runs on jammy,
 #                      noble, and anything with glibc >= 2.28.
-# CUDA is pinned to 13.0 to match the serving image (torch 2.11.0+cu130). The kernels
-# build for sm_80 + sm_90a (setup.py); sm_80 SASS covers the RTX 3090 / A5000 (sm_86).
+#
+# FLASH_MLA_CUDA_ARCHS is the SASS matrix baked into both wheels. sm_80 is the floor
+# (the Ampere kernels use cp.async / ldmatrix / mma.m16n8k16); the Hopper sources are
+# always additionally compiled for sm_90a. sm_100 / sm_120 require CUDA >= 12.8 --
+# this workflow pins CUDA 13.0, so they are in range.
 
 on:
   push:
-    branches: [build-wheels, appmana/vllm-ampere, appmana/vllm-ampere, main]
+    branches: [build-wheels, appmana/vllm-ampere, main]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -21,6 +23,7 @@ permissions:
 env:
   TORCH_VERSION: "2.11.0"
   CUDA_INDEX: "cu130"
+  FLASH_MLA_CUDA_ARCHS: "80,86,89,90,100,120"
 
 jobs:
   release-meta:
@@ -34,10 +37,14 @@ jobs:
         id: meta
         shell: bash
         run: |
-          short_sha="${GITHUB_SHA::7}"
-          timestamp="$(date -u +%Y%m%d-%H%M%S)"
-          echo "tag_name=nightly-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
-          echo "release_name=Nightly ${timestamp} (${short_sha})" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+          else
+            tag="v2.0.0"
+          fi
+          echo "tag_name=${tag}" >> "$GITHUB_OUTPUT"
+          echo "release_name=flash_mla ${tag}" >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------- jammy (glibc 2.35)
   jammy-wheel:
@@ -77,6 +84,7 @@ jobs:
           EXT_PARALLEL: "2"
           MAX_JOBS: "2"
           NVCC_THREADS: "2"
+          FLASH_MLA_CUDA_ARCHS: ${{ env.FLASH_MLA_CUDA_ARCHS }}
         run: |
           set -euo pipefail
           rm -rf build dist
@@ -137,7 +145,9 @@ jobs:
       - name: Build + repair manylinux_2_28 wheel in the pytorch cuda13 builder
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD":/io -w /io pytorch/manylinux2_28-builder:cuda13.0 bash -c '
+          docker run --rm -v "$PWD":/io -w /io \
+            -e FLASH_MLA_CUDA_ARCHS="${FLASH_MLA_CUDA_ARCHS}" \
+            pytorch/manylinux2_28-builder:cuda13.0 bash -c '
             set -euo pipefail
             export PATH=/opt/python/cp312-cp312/bin:$PATH
             python -m pip install -q -U pip uv
@@ -172,7 +182,7 @@ jobs:
 
   # ---------------------------------------------------------------- publish
   publish-release:
-    name: Publish prerelease
+    name: Publish release
     runs-on: ubuntu-24.04
     needs: [release-meta, jammy-wheel, manylinux-wheel]
     steps:
@@ -187,10 +197,11 @@ jobs:
           tag_name: ${{ needs.release-meta.outputs.tag_name }}
           target_commitish: ${{ github.sha }}
           name: ${{ needs.release-meta.outputs.release_name }}
-          prerelease: true
+          draft: false
+          prerelease: false
           files: release-artifacts/*.whl
           fail_on_unmatched_files: true
-          make_latest: false
+          make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

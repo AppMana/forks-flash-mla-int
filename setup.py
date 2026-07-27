@@ -8,6 +8,46 @@ from setuptools import setup, find_packages
 
 import torch
 
+# ---------------------------------------------------------------- target architectures
+#
+# There are two kernel families in csrc/:
+#   *_sm80.cu  -- the Ampere family (sparse MLA decode/prefill, fp8 + int8, dense bf16).
+#                 Uses cp.async / ldmatrix / mma.m16n8k16, so sm_80 is the hard floor.
+#                 Compiled for FLASH_MLA_CUDA_ARCHS.
+#   *_sm90.cu  -- the Hopper family (cutlass/WGMMA). Always compiled for sm_90a.
+# Everything else is compiled for sm_90a plus FLASH_MLA_CUDA_ARCHS.
+#
+# FLASH_MLA_CUDA_ARCHS is a comma-separated list of nvcc `code=sm_XX` names, e.g.
+#   FLASH_MLA_CUDA_ARCHS=86              -> native RTX A5000 / RTX 3090 build
+#   FLASH_MLA_CUDA_ARCHS=80,86,89        -> Ampere/Ada fat binary
+CUDA_ARCHS = [
+    a.strip()
+    for a in os.getenv("FLASH_MLA_CUDA_ARCHS", "80").replace(";", ",").split(",")
+    if a.strip()
+]
+
+
+def _gencode(archs):
+    flags = []
+    for a in archs:
+        flags += ["-gencode", f"arch=compute_{a},code=sm_{a}"]
+    return flags
+
+
+def _retarget(cuda_post_cflags, archs):
+    """Strip every `-gencode arch=...` pair from `cuda_post_cflags`, then add `archs`."""
+    kept, i = [], 0
+    while i < len(cuda_post_cflags):
+        flag = cuda_post_cflags[i]
+        if flag == "-gencode" and i + 1 < len(cuda_post_cflags) \
+                and cuda_post_cflags[i + 1].startswith("arch="):
+            i += 2
+            continue
+        kept.append(flag)
+        i += 1
+    return kept + _gencode(archs)
+
+
 # Copied from https://github.com/Dao-AILab/flash-attention/blob/main/hopper/setup.py
 # HACK: we monkey patch pytorch's _write_ninja_file to pass
 # "-gencode arch=compute_sm90a,code=sm_90a" to files ending in '_sm90.cu',
@@ -94,11 +134,15 @@ def _write_ninja_file(path,
     if with_cuda:
         flags.append(f'cuda_cflags = {" ".join(cuda_cflags)}')
         flags.append(f'cuda_post_cflags = {" ".join(cuda_post_cflags)}')
-        cuda_post_cflags_sm80 = [s if s != 'arch=compute_90a,code=sm_90a' else 'arch=compute_80,code=sm_80' for s in cuda_post_cflags]
+        # *_sm80.cu -> the requested architectures only.
+        cuda_post_cflags_sm80 = _retarget(cuda_post_cflags, CUDA_ARCHS)
         flags.append(f'cuda_post_cflags_sm80 = {" ".join(cuda_post_cflags_sm80)}')
-        cuda_post_cflags_sm80_sm90 = cuda_post_cflags + ['-gencode', 'arch=compute_80,code=sm_80']
+        # architecture-agnostic sources -> sm_90a plus the requested architectures.
+        # 9.x entries are dropped here: nvcc rejects sm_90 and sm_90a in one invocation.
+        cuda_post_cflags_sm80_sm90 = _retarget(
+            cuda_post_cflags, ['90a'] + [a for a in CUDA_ARCHS if not a.startswith('9')])
         flags.append(f'cuda_post_cflags_sm80_sm90 = {" ".join(cuda_post_cflags_sm80_sm90)}')
-        cuda_post_cflags_sm100 = [s if s != 'arch=compute_90a,code=sm_90a' else 'arch=compute_100a,code=sm_100a' for s in cuda_post_cflags]
+        cuda_post_cflags_sm100 = _retarget(cuda_post_cflags, ['100a'])
         flags.append(f'cuda_post_cflags_sm100 = {" ".join(cuda_post_cflags_sm100)}')
     flags.append(f'cuda_dlink_post_cflags = {" ".join(cuda_dlink_post_cflags)}')
     flags.append(f'ldflags = {" ".join(ldflags)}')
@@ -319,18 +363,21 @@ ext_modules.append(
 )
 
 
-try:
-    cmd = ['git', 'rev-parse', '--short', 'HEAD']
-    rev = '+' + subprocess.check_output(cmd).decode('ascii').rstrip()
-except Exception as _:
-    now = datetime.now()
-    date_time_str = now.strftime("%Y-%m-%d-%H-%M-%S")
-    rev = '+' + date_time_str
+# Release builds produce exactly "2.0.0". Set FLASH_MLA_LOCAL_VERSION=TRUE to append a
+# PEP 440 local-version segment ("+<git sha>", or a timestamp outside a git checkout) so
+# throwaway development wheels stay distinguishable from the release.
+VERSION = "2.0.0"
+if os.getenv("FLASH_MLA_LOCAL_VERSION", "FALSE") == "TRUE":
+    try:
+        cmd = ['git', 'rev-parse', '--short', 'HEAD']
+        VERSION += '+' + subprocess.check_output(cmd).decode('ascii').rstrip()
+    except Exception:
+        VERSION += '+' + datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
 
 
 setup(
     name="flash_mla",
-    version="2.0.0" + rev,
+    version=VERSION,
     packages=find_packages(include=['flash_mla']),
     ext_modules=ext_modules,
     cmdclass={"build_ext": BuildExtension},
