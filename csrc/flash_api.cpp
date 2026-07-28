@@ -47,14 +47,7 @@ DevProps get_dev_props(int device) {
     return p;
 }
 
-// sm_80 is a floor, not a target list. These kernels are written against
-// cp.async, ldmatrix and mma.sync.m16n8k16, which every architecture from
-// Ampere onward has; an equality test would reject hardware that runs the
-// code correctly. On consumer Blackwell (sm_12x) this port is also the only
-// sparse-MLA implementation available — upstream covers Hopper via WGMMA and
-// datacenter Blackwell via tcgen05, and sm_12x has neither. Instruction
-// availability is not correctness: the fp32-oracle suites in tests/ decide
-// that, on the target.
+// Floor: needs cp.async / ldmatrix / mma.sync.m16n8k16 (Ampere+).
 inline bool is_sparse_mla_arch(const DevProps &p) {
     return p.major >= 8;
 }
