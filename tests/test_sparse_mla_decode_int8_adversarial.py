@@ -1,9 +1,9 @@
 """Adversarial parity for the native int8_ds_mla sparse-MLA DECODE (sm_86).
 
-Red-first companion to tests/test_sparse_mla_prefill_int8_adversarial.py: the
-native CUDA sparse-MLA decode gains an int8_ds_mla entry point
+Companion to tests/test_sparse_mla_prefill_int8_adversarial.py: the
+native CUDA sparse-MLA decode's int8_ds_mla entry point
 (``flash_mla.sparse_mla_decode_int8`` -> ``torch.ops.flash_mla.fwd_sparse_int8_decode_mla``)
-that routes the selection through the H1 selection-scratch dequant pre-pass
+routes the selection through the H1 selection-scratch dequant pre-pass
 (int8 * fp32 rowwise scale -> bf16 scratch) and the unchanged bf16 attention
 kernels. Row format ground truth is the vLLM fork's int8 writer
 (cache_utils.py): 512 signed-int8 payload bytes + one fp32 rowwise scale at

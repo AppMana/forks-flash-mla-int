@@ -1,6 +1,6 @@
-"""De-risk gate for the fused int8 FlashMLA sm_86 kernel (task #61).
+"""De-risk gate for the fused int8 FlashMLA sm_86 kernel.
 
-Question this answers BEFORE any CUDA is written:
+Question this answers, independent of any CUDA:
   Does int8-QK (s8 IMMA, rowwise-symmetric Q and K) + int8-KV cache (rowwise V),
   with PV kept in bf16, preserve MLA *decode* accuracy at the real DSV4 head dims
   (d=576, dv=512, h=64)?

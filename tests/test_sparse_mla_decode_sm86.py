@@ -1,10 +1,10 @@
-"""Red-first oracle + parity test for the Ampere (sm_86) CUDA sparse-MLA decode kernel.
+"""Oracle + parity test for the Ampere (sm_86) CUDA sparse-MLA decode kernel.
 
 Builds a realistic fp8_ds_mla cache (the exact DSV4 byte layout), random top-k slot
 indices, computes the fp32 reference (absorbed MLA: V == K, head_dim 512), and asserts
 the CUDA kernel `sparse_mla_decode_fp8` matches.
 
-RED until the kernel + binding exist. Run:
+Run:
   CUDA_VISIBLE_DEVICES=1 python -m pytest tests/test_sparse_mla_decode_sm86.py -x -q
 """
 import math

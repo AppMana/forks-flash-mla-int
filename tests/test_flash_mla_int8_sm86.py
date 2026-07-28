@@ -1,4 +1,4 @@
-"""Red-first parity test for the fused int8 FlashMLA sm_86 decode kernel (task #61).
+"""Parity test for the fused int8 FlashMLA sm_86 decode kernel.
 
 Contract the kernel must satisfy:
   flash_mla_with_kvcache_int8(q_bf16, k_cache_int8, k_scale, v_scale, ...) must match
@@ -6,8 +6,6 @@ Contract the kernel must satisfy:
   -> p @ dequant(v_i8)) -- to near-machine precision, and track fp32 within the same
   cos_diff < 8e-5 bound the bf16 kernel is held to.
 
-RED state: flash_mla_cuda.fwd_kvcache_mla_int8 is not built, so the call raises
-NotImplementedError. Once the CUDA kernel + binding land, this goes green unchanged.
 Run: CUDA_VISIBLE_DEVICES=1 python -m pytest tests/test_flash_mla_int8_sm86.py -x
 """
 import math

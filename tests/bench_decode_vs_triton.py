@@ -6,7 +6,7 @@ Times, at h=64, d=576, dv=512, 512 KV tokens, 1 decode token:
   (2) the bf16 FlashMLA CUDA kernel (flash_mla_with_kvcache) -- the CUDA reference; int8
       should extend its lead by halving K/V memory traffic.
 
-int8 itself is not built yet (task #61) -- this establishes what it is competing with.
+This establishes the baseline the fused int8 kernel competes with.
 """
 import math
 import torch
@@ -79,5 +79,5 @@ if __name__ == "__main__":
                 print(f"  flashmla failed h={h_q} sk={sk}: {type(e).__name__}: {str(e)[:120]}")
             spd = (t_tri / t_fm) if (t_fm == t_fm and t_fm > 0) else float("nan")
             print(f"{'h=%d sk=%d'%(h_q,sk):<26}{t_tri:>18.1f}{t_fm:>20.1f}{spd:>13.2f}x")
-    print("\nint8 (task #61, not yet built) targets: <= bf16 FlashMLA latency, "
+    print("\nint8 targets: <= bf16 FlashMLA latency, "
           "with ~2x less K/V memory traffic -> expected further gain on this memory-bound decode.")

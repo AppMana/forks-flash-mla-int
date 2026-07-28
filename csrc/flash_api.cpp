@@ -66,8 +66,7 @@ DevProps get_dev_props(int device) {
 // cp.async, ldmatrix and mma.m16n8k16, all of which every architecture from
 // Ampere onward has; nothing about them stops working on a newer chip. An
 // equality test would have to be edited for each new generation and would
-// reject hardware that runs the code correctly -- which is exactly what kept
-// sm_121 out until it was found by running the suite on a GB10.
+// reject hardware that runs the code correctly.
 inline bool is_sparse_mla_arch(const DevProps &p) {
     return p.major >= 8;
 }

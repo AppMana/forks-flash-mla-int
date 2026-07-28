@@ -1,4 +1,4 @@
-"""RED-first tests for the standalone SM80 s8 IMMA fragment.
+"""Tests for the standalone SM80 s8 IMMA fragment.
 
 This deliberately does not touch the sparse decode kernel. The prefill work
 needs a proven m16n8k32 int8 tensor-core primitive before it is composed with
