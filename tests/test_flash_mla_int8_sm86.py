@@ -1,12 +1,7 @@
-"""Parity test for the fused int8 FlashMLA sm_86 decode kernel.
-
-Contract the kernel must satisfy:
-  flash_mla_with_kvcache_int8(q_bf16, k_cache_int8, k_scale, v_scale, ...) must match
-  O_int8 -- the exact fused math (q_i8 @ k_i8 -> s32 -> *q_scale*k_scale -> softmax(bf16)
-  -> p @ dequant(v_i8)) -- to near-machine precision, and track fp32 within the same
-  cos_diff < 8e-5 bound the bf16 kernel is held to.
-
-Run: CUDA_VISIBLE_DEVICES=1 python -m pytest tests/test_flash_mla_int8_sm86.py -x
+"""Parity for the fused int8 FlashMLA sm_86 decode kernel:
+flash_mla_with_kvcache_int8 must match the exact fused math (q_i8 @ k_i8 ->
+s32 -> *q_scale*k_scale -> softmax(bf16) -> p @ dequant(v_i8)) to near-machine
+precision, and track fp32 within cos_diff < 8e-5 (the bf16 kernel's bound).
 """
 import math
 import torch

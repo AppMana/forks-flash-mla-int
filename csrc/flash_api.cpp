@@ -142,10 +142,8 @@ mha_fwd_kvcache_mla(
 ) {
     int device = torch::stable::accelerator::getCurrentDeviceIndex();
     auto props = get_dev_props(device);
-    // sm_90 selects the WGMMA kernel; everything from sm_80 up runs the Ampere
-    // one. Upstream wrote this as "sm_80 or sm_90 exactly", which excluded
-    // sm_12x even though consumer Blackwell runs the Ampere path perfectly
-    // well -- the same equality bug that kept the sparse kernels off GB10.
+    // sm_90 selects the WGMMA kernel; any other sm_80+ runs the Ampere one
+    // (floor, not an equality test: sm_12x runs the Ampere path).
     bool is_sm90 = props.major == 9;
     STD_TORCH_CHECK(props.major >= 8, "requires sm_80 or newer; got sm_",
                     props.major, props.minor);
@@ -356,12 +354,9 @@ mha_fwd_sparse_decode_mla(
     int head_blocks = (H + 15) / 16;
     int max_total = p.swa_topk + (extra_cache.has_value() ? p.extra_topk : 0);
     int num_splits = props.sm_count * 3 / (T * head_blocks > 0 ? T * head_blocks : 1);
-    // slots/split target (env-tunable for sweeps). FMA kernels: 32 (the 16-warp CTAs
-    // hide latency; fine splits fill the SMs). mma decode (standalone parallel combine):
-    // ~16 splits with the chunk aligned UP to BLOCK_N=16 -- the sweep (16k caches, T=1)
-    // has a sharp minimum at chunk 32 @ width 512 (25.0 us; 28->30.0, 36->30.1) and
-    // chunk 64 @ width 1024 (30.7 us; 56->35.9, 96->33.2): ragged last tiles waste
-    // whole MMA tiles.
+    // slots/split target (env-tunable). FMA kernels: 32. mma decode: ~16
+    // splits, chunk aligned UP to BLOCK_N=16 — ragged last tiles waste whole
+    // MMA tiles.
     bool decode_mma = sparse_mla_decode_fused_enabled() && sparse_mla_decode_mma_enabled();
     int slots_per_split = 32;
     if (decode_mma) {
@@ -415,12 +410,8 @@ mha_fwd_sparse_int8_decode_mla(
     std::optional<Tensor> extra_lens
 ) {
     int device = torch::stable::accelerator::getCurrentDeviceIndex();
-    // No architecture check. The int8 sparse-MLA kernels are ours, not an
-    // inherited upstream path, and every caller selects them explicitly by
-    // reaching for an int8 KV cache. A guard here can only turn a deliberate
-    // choice into a runtime error on some architecture nobody has tried yet;
-    // correctness is established by the suites in tests/, not by a major
-    // version number. (props is still needed below for sm_count.)
+    // No arch gate: callers opt into the fork-only int8 path explicitly;
+    // tests/ establish correctness. props is only needed for sm_count.
     auto props = get_dev_props(device);
 
     int T = q.size(0), H = q.size(1), D = q.size(2);

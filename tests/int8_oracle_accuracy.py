@@ -1,19 +1,10 @@
-"""De-risk gate for the fused int8 FlashMLA sm_86 kernel.
+"""Accuracy gate: does int8-QK + int8-KV (PV in bf16) preserve MLA decode
+accuracy at DSV4 dims (d=576, dv=512, h=64)?
 
-Question this answers, independent of any CUDA:
-  Does int8-QK (s8 IMMA, rowwise-symmetric Q and K) + int8-KV cache (rowwise V),
-  with PV kept in bf16, preserve MLA *decode* accuracy at the real DSV4 head dims
-  (d=576, dv=512, h=64)?
-
-It computes three references on identical inputs:
-  - O_fp32 : full-precision SDPA (the ground truth, what the bf16 kernel matches).
-  - O_int8 : the EXACT math the fused int8 kernel will do
-             (q_i8 @ k_i8 -> int32 -> *q_scale*k_scale -> softmax -> p @ dequant(v_i8)).
-  - O_bf16ref : bf16 SDPA (so we can see int8 error vs the bf16 baseline error).
-
-If O_int8 tracks O_fp32 about as well as O_bf16ref does, int8 is viable and we build
-the kernel. If int8 is materially worse, the scheme changes (per-group K scales, or
-int8-KV-only) -- better to learn that now than after writing the kernel.
+Compares, on identical inputs: O_fp32 (ground truth), O_int8 (the exact fused
+int8 math: q_i8 @ k_i8 -> int32 -> *q_scale*k_scale -> softmax -> p @
+dequant(v_i8)), and O_bf16ref (the bf16 baseline error). int8 is viable iff it
+tracks O_fp32 about as well as O_bf16ref does.
 """
 import math
 import torch

@@ -1,22 +1,9 @@
-"""Adversarial parity for the native int8_ds_mla sparse-MLA DECODE (sm_86).
-
-Companion to tests/test_sparse_mla_prefill_int8_adversarial.py: the
-native CUDA sparse-MLA decode's int8_ds_mla entry point
-(``flash_mla.sparse_mla_decode_int8`` -> ``torch.ops.flash_mla.fwd_sparse_int8_decode_mla``)
-routes the selection through the H1 selection-scratch dequant pre-pass
-(int8 * fp32 rowwise scale -> bf16 scratch) and the unchanged bf16 attention
-kernels. Row format ground truth is the vLLM fork's int8 writer
-(cache_utils.py): 512 signed-int8 payload bytes + one fp32 rowwise scale at
-byte offset 512, token stride 528 (16B-aligned). The op takes the stride at
-runtime, so both layouts are exercised:
-  - inline 528B byte cache consumed through strided (int8_rows, fp32_scales)
-    views, exactly like get_int8_ds_mla_cache_views produces, and
-  - the legacy separate-tensor layout (contiguous int8 [nb, bs, 512] + fp32
-    scale [nb, bs]).
-Oracle: fp32 torch over the DEQUANTIZED (int8 * scale) rows; cross-check vs
-the Triton int8 decode.
-
-Run: CUDA_VISIBLE_DEVICES=1 python -m pytest tests/test_sparse_mla_decode_int8_adversarial.py -x -q
+"""Adversarial parity for the native int8_ds_mla sparse-MLA DECODE (sm_86),
+``flash_mla.sparse_mla_decode_int8``. Row format is the vLLM fork's int8
+writer: 512 int8 payload bytes + fp32 rowwise scale at byte offset 512, token
+stride 528. The op takes the stride at runtime, so both the inline-528B
+strided views and the legacy separate-tensor layout are exercised. Oracle:
+fp32 torch over the dequantized rows; cross-checked vs the Triton int8 decode.
 """
 import math
 
