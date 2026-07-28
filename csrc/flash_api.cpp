@@ -47,26 +47,14 @@ DevProps get_dev_props(int device) {
     return p;
 }
 
-// Which architectures may run the sparse-MLA kernels.
-//
-// These kernels are written against `cp.async`, `ldmatrix` and
-// `mma.sync.m16n8k16` — the Ampere instruction set. Consumer Blackwell (sm_12x,
-// e.g. the GB10 in a DGX Spark) supports all three, so the kernels are valid
-// there even though they were authored for and originally validated on sm_8x.
-//
-// Widening this is not cosmetic: sm_12x has no alternative. Upstream FlashMLA
-// covers Hopper via WGMMA (sm_90) and datacenter Blackwell via tcgen05
-// (sm_100), and consumer Blackwell has neither instruction family. This port is
-// the only sparse-MLA implementation that can run on a GB10 at all.
-//
-// Correctness is a separate question from instruction availability. The suites
-// in tests/ check every kernel against an fp32 oracle; run them on the target
-// before trusting a new architecture here.
 // sm_80 is a floor, not a target list. These kernels are written against
-// cp.async, ldmatrix and mma.m16n8k16, all of which every architecture from
-// Ampere onward has; nothing about them stops working on a newer chip. An
-// equality test would have to be edited for each new generation and would
-// reject hardware that runs the code correctly.
+// cp.async, ldmatrix and mma.sync.m16n8k16, which every architecture from
+// Ampere onward has; an equality test would reject hardware that runs the
+// code correctly. On consumer Blackwell (sm_12x) this port is also the only
+// sparse-MLA implementation available — upstream covers Hopper via WGMMA and
+// datacenter Blackwell via tcgen05, and sm_12x has neither. Instruction
+// availability is not correctness: the fp32-oracle suites in tests/ decide
+// that, on the target.
 inline bool is_sparse_mla_arch(const DevProps &p) {
     return p.major >= 8;
 }
