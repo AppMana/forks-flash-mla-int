@@ -57,8 +57,8 @@ def _int8_oracle(q, blocked_k, k_scale, v_scale, block_table, cache_seqlens, dv,
 @pytest.mark.parametrize("seqlen", [512, 4096])
 @pytest.mark.parametrize("s_q", [1])
 def test_int8_decode_parity(h_q, seqlen, s_q):
-    if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
-        pytest.skip("int8 sm_86 path requires Ampere (capability 8.x)")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
     torch.manual_seed(0)
     device = "cuda"
     b, h_kv, d, dv = 1, 1, 576, 512

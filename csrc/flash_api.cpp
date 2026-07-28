@@ -62,15 +62,20 @@ DevProps get_dev_props(int device) {
 // Correctness is a separate question from instruction availability. The suites
 // in tests/ check every kernel against an fp32 oracle; run them on the target
 // before trusting a new architecture here.
+// sm_80 is a floor, not a target list. These kernels are written against
+// cp.async, ldmatrix and mma.m16n8k16, all of which every architecture from
+// Ampere onward has; nothing about them stops working on a newer chip. An
+// equality test would have to be edited for each new generation and would
+// reject hardware that runs the code correctly -- which is exactly what kept
+// sm_121 out until it was found by running the suite on a GB10.
 inline bool is_sparse_mla_arch(const DevProps &p) {
-    return p.major == 8      // Ampere: sm_80 / sm_86 / sm_89
-        || p.major == 12;    // consumer Blackwell: sm_120 / sm_121
+    return p.major >= 8;
 }
 
 #define CHECK_SPARSE_MLA_ARCH(props, what)                                     \
     STD_TORCH_CHECK(is_sparse_mla_arch(props),                                 \
-                    what " requires Ampere (sm_8x) or consumer Blackwell "     \
-                         "(sm_12x); got sm_",                                  \
+                    what " requires sm_80 or newer (cp.async, ldmatrix, "      \
+                         "mma.m16n8k16); got sm_",                             \
                     (props).major, (props).minor)
 
 cudaStream_t current_cuda_stream(int device) {
@@ -157,9 +162,13 @@ mha_fwd_kvcache_mla(
 ) {
     int device = torch::stable::accelerator::getCurrentDeviceIndex();
     auto props = get_dev_props(device);
-    bool is_sm8x = props.major == 8 && props.minor >= 0;
-    bool is_sm90 = props.major == 9 && props.minor == 0;
-    STD_TORCH_CHECK(is_sm90 || is_sm8x, "Only sm80 to sm90 (inclusive) are supported");
+    // sm_90 selects the WGMMA kernel; everything from sm_80 up runs the Ampere
+    // one. Upstream wrote this as "sm_80 or sm_90 exactly", which excluded
+    // sm_12x even though consumer Blackwell runs the Ampere path perfectly
+    // well -- the same equality bug that kept the sparse kernels off GB10.
+    bool is_sm90 = props.major == 9;
+    STD_TORCH_CHECK(props.major >= 8, "requires sm_80 or newer; got sm_",
+                    props.major, props.minor);
 
     Tensor vcache = vcache_.has_value() ? vcache_.value() : kcache;
 

@@ -75,8 +75,8 @@ def _fp32_ref(q, K_by_slot, indices, lens, scale, attn_sink):
 @pytest.mark.parametrize("H", [64])
 @pytest.mark.parametrize("topk", [256, 512])
 def test_sparse_mla_decode_parity(H, topk):
-    if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
-        pytest.skip("sm_86 sparse-MLA decode kernel requires Ampere (capability 8.x)")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
     from flash_mla import sparse_mla_decode_fp8
 
     torch.manual_seed(0)

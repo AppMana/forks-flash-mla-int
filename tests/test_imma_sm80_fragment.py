@@ -13,8 +13,8 @@ import flash_mla  # noqa: F401  # loads flash_mla_cuda and registers torch.ops.f
 
 @pytest.mark.parametrize("seed", [0, 1, 2])
 def test_debug_imma_m16n8k32_s8s8_matches_torch(seed):
-    if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
-        pytest.skip("requires Ampere (capability 8.x)")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
 
     torch.manual_seed(seed)
     a = torch.randint(-17, 18, (16, 32), device="cuda", dtype=torch.int8)

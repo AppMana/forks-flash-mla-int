@@ -292,8 +292,11 @@ def get_cuda_include_dirs():
     include_dirs = []
     cuda_home = os.getenv("CUDA_HOME")
     if cuda_home:
-        cccl_include = Path(cuda_home) / "targets" / "x86_64-linux" / "include" / "cccl"
-        if cccl_include.exists():
+        # CUDA lays this out per target triple, and the arm64 one is
+        # sbsa-linux, not aarch64-linux. Hardcoding x86_64 silently dropped the
+        # cccl include on the DGX Spark builds. Glob rather than name the
+        # triple, so a future target needs no edit here.
+        for cccl_include in sorted((Path(cuda_home) / "targets").glob("*/include/cccl")):
             include_dirs.append(cccl_include)
     return include_dirs
 
