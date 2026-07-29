@@ -268,6 +268,31 @@ kernels are tiled for A100-class shared memory; the accounting is in
 | `FLASH_MLA_PREFILL_MMA` | off | `1` routes `num_splits == 1` fp8 decode calls to `mma_pf::sparse_mla_prefill_mma_kernel` |
 | `FLASH_MLA_SLOTS_PER_SPLIT` | auto | Overrides the split-KV chunk size |
 
+## Downstream serving evidence
+
+The AppMana vLLM fork selects the INT8-cache operators by their importable
+symbols:
+
+```text
+decode=flash_mla.sparse_mla_decode_int8
+prefill=flash_mla.sparse_mla_prefill_int8
+cache_type=int8_ds_mla
+```
+
+That exact kernel selection produced correct DeepSeek-V4 chat answers on two
+DGX Sparks at TP=2 and completed an 8,004-token prompt / 1,128-token output
+needle run at 5.23 s TTFT, approximately 1,532 input tok/s, and 38.5 decode
+tok/s. The 1,000-token needle passed with a 0.94 word-level match ratio.
+
+This is integration evidence, not a release benchmark for this repository:
+the server ran from a native host environment whose exact installed
+FlashMLA/vLLM revisions were not frozen, and one Triton JIT miss occurred
+during inference. It also says nothing about the separate
+SparkInfer/NVFP4 lane, which is currently incorrect. The evidence boundaries,
+kernel matrix, public comparison numbers, and reproduction checklist are in
+the
+[Hilton performance reference](https://github.com/hannesholste/dragonintel/blob/main/docs/dsv4-spark-performance-references.md).
+
 ## Benchmarks
 
 RTX A5000 (`sm_86`), 16k-slot caches, 64 heads, `T = 1` decode and a 1024-token prefill
