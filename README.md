@@ -8,7 +8,9 @@ Two kernel families ship here:
 - **Sparse MLA** for DeepSeek-V4-Flash in the absorbed form (`head_dim = 512`, `V == K`,
   attention restricted to the indexer-selected top-k slots). Native CUDA tensor-core
   decode and prefill kernels for `sm_80`/`sm_86`, over both `fp8_ds_mla` and `int8_ds_mla`
-  paged caches.
+  paged caches. In every one of them the cache dtype names the *storage*: the math is bf16
+  tensor-core throughout — see
+  [`int8` names the cache, not the math](#int8-names-the-cache-not-the-math).
 - **Dense MLA** — the upstream paged-KV `head_dim 576 / 512` decode kernel, with an
   additional warp-specialized SM80 variant alongside the SM90 originals.
 
@@ -168,6 +170,33 @@ so a strided view over an interleaved 528-byte token stride works unchanged. The
 entry point additionally requires contiguous rows and 16-byte-aligned block and token
 strides, because it gathers with 16-byte `cp.async` chunks. `quantize_int8_ds_mla_rows`
 produces this format from bf16 rows.
+
+### `int8` names the cache, not the math
+
+This is the point most often misread, so it is worth stating outright: in
+`sparse_mla_decode_int8` and `sparse_mla_prefill_int8`, `int8` describes the **KV cache
+format**. The attention arithmetic is **bf16 tensor-core** in both, exactly as in the fp8
+entry points.
+
+Every sparse kernel here issues `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32` for
+QK and PV. `q` is bfloat16 on all four entry points — the binding rejects anything else —
+and the int8 cache rows are gathered raw and converted to bf16 (`int8 * scale`, one
+convert-and-multiply per element) on their way into the mma ring. **No integer MMA is
+involved.** The only `s32.s8.s8` instruction in this repository is
+`debug_imma_m16n8k32_s8s8`, a test-only fragment probe that no production path calls.
+
+This is by design, not a missing optimization. What the int8 cache buys is **memory**:
+528 bytes per token against `fp8_ds_mla`'s 584, halved random-gather traffic on the
+prefill path, and — because the int8 prefill dequantizes in-kernel rather than through a
+whole-cache pre-pass — no allocation sized by the KV pool at all. What it does not buy is
+integer tensor-core throughput, and it is not intended to: the accuracy analysis in
+`docs/int8_fused_sm86_design.md` is what justifies storing the cache this way, and the
+bf16 math is what keeps the result element-for-element identical to the fp8 pre-pass path.
+
+Integer MMA does appear in the DeepSeek-V4 stack, but in a different kernel and a
+different repository: the **lightning indexer** logits, where both the query and the K
+cache are int8 (vLLM's `indexer_query_int8` and `indexer_cache_int8` roles). That is a
+separate code path from sparse MLA and is not part of this fork.
 
 ## Kernel reference
 
