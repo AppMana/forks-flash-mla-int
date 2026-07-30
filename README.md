@@ -49,7 +49,7 @@ pip resolves the right one for your platform — x86_64 or aarch64, `manylinux_2
 or jammy — without pinning a URL:
 
 ```bash
-pip install flash-mla --extra-index-url https://appmana.github.io/forks-flash-mla-ampere-dsv4/
+pip install flash-mla --extra-index-url https://appmana.github.io/forks-flash-mla-int/
 ```
 
 Every wheel is `cp39-abi3` and torch-stable, so one wheel works across torch >= 2.9
