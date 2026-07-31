@@ -28,6 +28,13 @@ PAD_BYTES = 12
 TOKEN_BYTES = INT8_DIM + SCALE_BYTES + PAD_BYTES  # 528
 
 
+def _native_int8_prefill_supported() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    major, _minor = torch.cuda.get_device_capability(0)
+    return major in (8, 12)
+
+
 def cos_diff(x, y):
     x, y = x.double(), y.double()
     return 1 - 2 * (x * y).sum().item() / max((x * x + y * y).sum().item(), 1e-12)
@@ -77,8 +84,8 @@ def _build_separate_cache(num_slots: int, block_size: int, dev: str):
 @pytest.mark.parametrize("layout", ["inline528", "separate"])
 @pytest.mark.parametrize("swa_topk,extra_topk", [(256, 256), (512, 512)])
 def test_int8_prefill_adversarial_parity(layout, swa_topk, extra_topk):
-    if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
-        pytest.skip("requires Ampere")
+    if not _native_int8_prefill_supported():
+        pytest.skip("requires Ampere or consumer Blackwell")
     from flash_mla.int8_sparse_mla import sparse_mla_prefill_int8
 
     torch.manual_seed(21)
@@ -128,8 +135,8 @@ def test_int8_prefill_adversarial_parity(layout, swa_topk, extra_topk):
 
 @pytest.mark.parametrize("layout", ["inline528", "separate"])
 def test_int8_prefill_swa_only_parity(layout):
-    if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
-        pytest.skip("requires Ampere")
+    if not _native_int8_prefill_supported():
+        pytest.skip("requires Ampere or consumer Blackwell")
     from flash_mla.int8_sparse_mla import sparse_mla_prefill_int8
 
     torch.manual_seed(23)
@@ -161,8 +168,8 @@ def test_int8_prefill_tp2_dspark_serving_shape(concurrency):
     Each TP2 rank retains 32 query heads and attends over the 128-token SWA
     stream plus 512 C4 compressed-cache rows.
     """
-    if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
-        pytest.skip("requires Ampere")
+    if not _native_int8_prefill_supported():
+        pytest.skip("requires Ampere or consumer Blackwell")
     from flash_mla.int8_sparse_mla import sparse_mla_prefill_int8
 
     torch.manual_seed(31 + concurrency)
