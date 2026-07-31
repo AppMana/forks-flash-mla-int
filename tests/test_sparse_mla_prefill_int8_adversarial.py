@@ -151,3 +151,75 @@ def test_int8_prefill_swa_only_parity(layout):
     )
     cd = cos_diff(out.float(), O_ref)
     assert cd < 8e-5, f"int8 swa-only prefill cos_diff={cd:.2e} (layout={layout})"
+
+
+@pytest.mark.parametrize("concurrency", [1, 2])
+def test_int8_prefill_tp2_dspark_serving_shape(concurrency):
+    """Exact TP2 DSpark draft-prefill shape used by DSV4-Flash.
+
+    Five speculative tokens plus the anchor produce six rows per request.
+    Each TP2 rank retains 32 query heads and attends over the 128-token SWA
+    stream plus 512 C4 compressed-cache rows.
+    """
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
+        pytest.skip("requires Ampere")
+    from flash_mla.int8_sparse_mla import sparse_mla_prefill_int8
+
+    torch.manual_seed(31 + concurrency)
+    dev = "cuda"
+    rows = concurrency * 6
+    heads = 32
+    swa_topk = 128
+    extra_topk = 512
+    scale = 1.0 / math.sqrt(HEAD_DIM)
+
+    # These are the live vLLM packed-cache page sizes at block_size=256.
+    swa_cache, swa_scale, swa_k = _build_inline_cache(384, 256, dev)
+    extra_cache, extra_scale, extra_k = _build_inline_cache(640, 64, dev)
+    q = torch.randn(rows, heads, HEAD_DIM, device=dev, dtype=torch.bfloat16)
+    swa_lens = torch.full(
+        (rows,), swa_topk, dtype=torch.int32, device=dev
+    )
+    extra_lens = torch.full(
+        (rows,), extra_topk, dtype=torch.int32, device=dev
+    )
+    swa_idx = torch.stack(
+        [torch.randperm(swa_k.shape[0], device=dev)[:swa_topk] for _ in range(rows)]
+    ).to(torch.int32)
+    extra_idx = torch.stack(
+        [
+            torch.randperm(extra_k.shape[0], device=dev)[:extra_topk]
+            for _ in range(rows)
+        ]
+    ).to(torch.int32)
+    sink = torch.randn(heads, device=dev, dtype=torch.float32) * 0.1
+
+    expected = _ref(
+        q,
+        swa_k,
+        swa_idx,
+        swa_lens,
+        extra_k,
+        extra_idx,
+        extra_lens,
+        scale,
+        sink,
+    )
+    out = sparse_mla_prefill_int8(
+        q,
+        swa_cache,
+        swa_scale,
+        swa_idx,
+        swa_lens,
+        scale=scale,
+        attn_sink=sink,
+        extra_cache=extra_cache,
+        extra_scale=extra_scale,
+        extra_indices=extra_idx,
+        extra_lens=extra_lens,
+    )
+
+    assert out.dtype == torch.bfloat16
+    assert torch.isfinite(out).all()
+    assert cos_diff(out.float(), expected) < 8e-5
+    torch.testing.assert_close(out.float(), expected, rtol=2e-2, atol=2e-2)
