@@ -1,6 +1,7 @@
 # Ampere (sm_86) CUDA sparse-MLA decode kernel — design
 
-**Status:** new kernel project. No public Ampere CUDA sparse-MLA decode exists — DeepSeek's
+**Status:** production-validated Ampere kernel. No public Ampere CUDA sparse-MLA decode existed when
+this implementation was started — DeepSeek's
 sparse FlashMLA is SM90 (WGMMA) / SM100 (tcgen05) only; every Ampere fork ports only the
 *dense* kernel; cross-arch support is a TileLang/Triton reference (vLLM #30644, #35021). This
 is the first Ampere CUDA implementation, written from the algorithm (not a port of the Hopper
@@ -310,3 +311,48 @@ attention; `FLASH_MLA_DECODE_FUSED_COMBINE=1` -> in-kernel last-CTA combine;
 `FLASH_MLA_SLOTS_PER_SPLIT` -> split sweeps. Binding change: the fused path allocates
 a bf16 [T*width, 512] scratch (`sel_kv_ptr`/`sel_width`) only when num_splits>1, so
 large-T prefill fallbacks never allocate it.
+
+## Production split-precision correction and RTX 3090 policy (2026-08-31)
+
+The selection scratch remains bf16, but split attention partials do not. Storing each
+split's unnormalized output accumulator in bf16 made the combine result depend on the
+number of splits. This was small under ordinary random-error tolerances but became a
+deterministic token error in a long-context serving request. The split `oaccum` buffer,
+stores, loads, and vectorized combine are now fp32 for both fp8 and int8 decode. The
+final output remains bf16.
+
+The precision test was authored against the old implementation first. At the production
+long-context shape it compares a one-split result with both coarse and fine split layouts.
+The bf16-partial implementation failed both cases (RMSE about 6.1e-4); the fp32-partial
+implementation passes both. The complete sparse INT8 decode suite passes 33 tests,
+including adversarial cache layout, ragged selections, invalid indices, and split-count
+invariance.
+
+Split selection now models the two attention implementations separately:
+
+- MMA: 32 heads per CTA, one resident CTA per SM, target 96 selected rows per split,
+  capped by useful occupancy.
+- FMA: 16 heads per CTA, up to three queued CTAs per SM.
+
+The 96-row MMA policy was swept on a real 82-SM RTX 3090 at the production packed-INT8
+layout. CUDA-event medians for the selected defaults are:
+
+| tokens | selected width | splits | median latency |
+| ---: | ---: | ---: | ---: |
+| 1 | 640 | 7 | 33.26 us |
+| 1 | 1024 | 11 | 34.11 us |
+| 1 | 4224 | 41 | 58.13 us |
+| 8 | 640 | 5 | 59.16 us |
+| 8 | 1024 | 5 | 81.56 us |
+| 8 | 4224 | 5 | 263.68 us |
+
+Against the previous eight-oriented policy on the same GPU, the corrected default is
+about 33% faster for the long single-token shape and 15% faster for the eight-token
+shape. Neither kernel has register spills in the active attention or combine paths.
+
+The end-to-end acceptance test used the OpenAI-compatible chat-completions API with a
+512k-token input and a 1k-token verbatim-retrieval output. With decode CUDA graphs
+enabled, the fp32-partial native kernel reproduced the needle exactly and sustained
+35.36 decoded tokens/s. Running the same binary in forced eager mode roughly halved
+decode throughput, so eager diagnostic deployments must not be used as production
+performance baselines.

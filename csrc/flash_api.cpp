@@ -72,6 +72,35 @@ bool shape_eq(const Tensor &t, const std::vector<int64_t> &s) {
     return true;
 }
 
+int sparse_mla_num_splits(int sm_count, int num_tokens, int num_heads,
+                          int max_total, bool decode_mma) {
+    // The MMA kernel maps 32 heads to each CTA and its shared-memory footprint
+    // permits one resident CTA per SM.  The FMA kernel maps 16 heads per CTA
+    // and benefits from additional queued CTAs to hide memory latency.
+    int heads_per_cta = decode_mma ? 32 : 16;
+    int target_ctas_per_sm = decode_mma ? 1 : 3;
+    int head_blocks = ceil_div(num_heads, heads_per_cta);
+    int parallelism = num_tokens * head_blocks;
+    int num_splits = sm_count * target_ctas_per_sm /
+                     (parallelism > 0 ? parallelism : 1);
+
+    // Tensor-core decode targets enough rows per split to amortize each CTA
+    // while the occupancy bound above prevents redundant work once all SMs
+    // are filled.  FP32 split partials make this scheduling choice independent
+    // of the attention reduction's numerical precision.
+    int slots_per_split = 32;
+    if (decode_mma) {
+        slots_per_split = 96;
+    }
+    if (const char *e = getenv("FLASH_MLA_SLOTS_PER_SPLIT")) {
+        int value = atoi(e);
+        if (value > 0) slots_per_split = value;
+    }
+
+    int cap_by_slots = ceil_div(max_total, slots_per_split);
+    return std::clamp(num_splits, 1, std::min(64, std::max(1, cap_by_slots)));
+}
+
 }  // namespace
 
 #define CHECK_DEVICE(x) STD_TORCH_CHECK(x.is_cuda(), #x " must be on CUDA")
@@ -349,33 +378,18 @@ mha_fwd_sparse_decode_mla(
         p.extra_block_size = extra_cache.value().size(1);
     }
 
-    // split-KV: pick a split count that fills the SMs (T=1 decode otherwise uses few CTAs),
-    // capped so each split keeps >= ~64 slots. Empty splits are cheap + handled by the kernel.
+    // split-KV: fill the SMs without exceeding the kernel-specific split cap.
     int head_blocks = (H + 15) / 16;
     int max_total = p.swa_topk + (extra_cache.has_value() ? p.extra_topk : 0);
-    int num_splits = props.sm_count * 3 / (T * head_blocks > 0 ? T * head_blocks : 1);
-    // slots/split target (env-tunable). FMA kernels: 32. mma decode: ~16
-    // splits, chunk aligned UP to BLOCK_N=16 — ragged last tiles waste whole
-    // MMA tiles.
     bool decode_mma = sparse_mla_decode_fused_enabled() && sparse_mla_decode_mma_enabled();
-    int slots_per_split = 32;
-    if (decode_mma) {
-        int tgt = (max_total + 15) / 16;           // chunk for 16 splits
-        tgt = (tgt + 15) / 16 * 16;                // align chunk to BLOCK_N
-        slots_per_split = std::max(32, tgt);
-    }
-    if (const char *e = getenv("FLASH_MLA_SLOTS_PER_SPLIT")) { int v = atoi(e); if (v > 0) slots_per_split = v; }
-    int cap_by_slots = (max_total + slots_per_split - 1) / slots_per_split;
-    if (cap_by_slots < 1) cap_by_slots = 1;
-    if (num_splits > cap_by_slots) num_splits = cap_by_slots;
-    if (num_splits < 1) num_splits = 1;
-    if (num_splits > 64) num_splits = 64;
+    int num_splits = sparse_mla_num_splits(props.sm_count, T, H, max_total, decode_mma);
     p.num_splits = num_splits;
 
     // num_splits==1 (prefill / large-T) writes output directly in-kernel: skip the split-KV
-    // partial buffers entirely (oaccum alone is T*H*512 bf16 -> 134 MB at T=2048).
+    // partial buffers entirely (oaccum alone is T*H*512 fp32 -> 268 MB at T=2048).
     bool split = num_splits > 1;
-    Tensor oaccum = torch::stable::new_empty(q, {split ? T : 1, H, num_splits, D});  // bf16, un-normalized partials
+    Tensor oaccum = torch::stable::new_empty(
+        q, {split ? T : 1, H, num_splits, D}, ScalarType::Float);
     Tensor mlse = torch::stable::new_empty(q, {split ? T : 1, H, num_splits, 2}, ScalarType::Float);
     Tensor counter = torch::stable::new_empty(q, {split ? T * head_blocks : 1}, ScalarType::Int);
     p.oaccum_ptr = oaccum.data_ptr();
@@ -473,24 +487,13 @@ mha_fwd_sparse_int8_decode_mla(
     // Same split policy as the fp8 decode entry.
     int head_blocks = (H + 15) / 16;
     int max_total = p.swa_topk + (extra_cache.has_value() ? p.extra_topk : 0);
-    int num_splits = props.sm_count * 3 / (T * head_blocks > 0 ? T * head_blocks : 1);
     bool decode_mma = sparse_mla_decode_fused_enabled() && sparse_mla_decode_mma_enabled();
-    int slots_per_split = 32;
-    if (decode_mma) {
-        int tgt = (max_total + 15) / 16;
-        tgt = (tgt + 15) / 16 * 16;
-        slots_per_split = std::max(32, tgt);
-    }
-    if (const char *e = getenv("FLASH_MLA_SLOTS_PER_SPLIT")) { int v = atoi(e); if (v > 0) slots_per_split = v; }
-    int cap_by_slots = (max_total + slots_per_split - 1) / slots_per_split;
-    if (cap_by_slots < 1) cap_by_slots = 1;
-    if (num_splits > cap_by_slots) num_splits = cap_by_slots;
-    if (num_splits < 1) num_splits = 1;
-    if (num_splits > 64) num_splits = 64;
+    int num_splits = sparse_mla_num_splits(props.sm_count, T, H, max_total, decode_mma);
     p.num_splits = num_splits;
 
     bool split = num_splits > 1;
-    Tensor oaccum = torch::stable::new_empty(q, {split ? T : 1, H, num_splits, D});
+    Tensor oaccum = torch::stable::new_empty(
+        q, {split ? T : 1, H, num_splits, D}, ScalarType::Float);
     Tensor mlse = torch::stable::new_empty(q, {split ? T : 1, H, num_splits, 2}, ScalarType::Float);
     Tensor counter = torch::stable::new_empty(q, {split ? T * head_blocks : 1}, ScalarType::Int);
     p.oaccum_ptr = oaccum.data_ptr();

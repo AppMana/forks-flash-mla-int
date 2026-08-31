@@ -91,7 +91,7 @@ struct Sparse_mla_decode_params {
     const int *extra_lens_ptr;
     int extra_topk, extra_num_blocks, extra_block_size;
     // split-KV (flash-decoding): partial buffers + split count, filled by the binding.
-    void *oaccum_ptr;    // bf16 [T, H, num_splits, 512] un-normalized acc per split (halves combine traffic)
+    void *oaccum_ptr;    // fp32 [T, H, num_splits, 512] un-normalized acc per split
     float *mlse_ptr;     // [T, H, num_splits, 2]   {running max m, denom l} per split
     int *combine_counter_ptr;  // [T * head_blocks] int, zeroed; last split-CTA per (t,hb) runs combine
     int num_splits;

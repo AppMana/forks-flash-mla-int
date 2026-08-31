@@ -69,9 +69,9 @@ __device__ __forceinline__ void combine_one_head(const Sparse_mla_decode_params 
         float scale = exp2f(p.mlse_ptr[(pm0 + sp) * 2] - gm);
         if (scale == 0.f) continue;
         gl += p.mlse_ptr[(pm0 + sp) * 2 + 1] * scale;
-        const __nv_bfloat16 *oacc = reinterpret_cast<const __nv_bfloat16 *>(p.oaccum_ptr) + (pm0 + sp) * HEAD_DIM;
+        const float *oacc = reinterpret_cast<const float *>(p.oaccum_ptr) + (pm0 + sp) * HEAD_DIM;
 #pragma unroll
-        for (int i = 0; i < VEC; ++i) cacc[i] += __bfloat162float(oacc[lane + i * 32]) * scale;
+        for (int i = 0; i < VEC; ++i) cacc[i] += oacc[lane + i * 32] * scale;
     }
     float inv = 1.f / fmaxf(gl, 1e-20f);
     __nv_bfloat16 *out_ptr = reinterpret_cast<__nv_bfloat16 *>(p.o_ptr)
@@ -81,7 +81,7 @@ __device__ __forceinline__ void combine_one_head(const Sparse_mla_decode_params 
 }
 
 // vectorized combine (mma path): lane owns dims [lane*16, lane*16+16) -> the per-split
-// oaccum row is read as 2x uint4 (16 bf16) instead of 16 strided scalar loads. The
+// oaccum row is read as 4x float4 (16 fp32) instead of 16 scalar loads. The
 // combine runs in ONE last CTA per head block and its load chain is a real tail cost
 // at coarse splits; 8x fewer LSU ops cut it proportionally.
 __device__ __forceinline__ void combine_one_head_vec(const Sparse_mla_decode_params &p, int t, int h, int lane) {
@@ -96,18 +96,15 @@ __device__ __forceinline__ void combine_one_head_vec(const Sparse_mla_decode_par
         float scale = exp2f(p.mlse_ptr[(pm0 + sp) * 2] - gm);
         if (scale == 0.f) continue;
         gl += p.mlse_ptr[(pm0 + sp) * 2 + 1] * scale;
-        const uint4 *oacc = reinterpret_cast<const uint4 *>(
-            reinterpret_cast<const __nv_bfloat16 *>(p.oaccum_ptr) + (pm0 + sp) * HEAD_DIM + lane * VEC);
+        const float4 *oacc = reinterpret_cast<const float4 *>(
+            reinterpret_cast<const float *>(p.oaccum_ptr) + (pm0 + sp) * HEAD_DIM + lane * VEC);
 #pragma unroll
-        for (int v = 0; v < 2; ++v) {
-            uint4 raw = oacc[v];
-            const __nv_bfloat162 *b2 = reinterpret_cast<const __nv_bfloat162 *>(&raw);
-#pragma unroll
-            for (int j = 0; j < 4; ++j) {
-                float2 f = __bfloat1622float2(b2[j]);
-                cacc[v * 8 + j * 2] += f.x * scale;
-                cacc[v * 8 + j * 2 + 1] += f.y * scale;
-            }
+        for (int v = 0; v < 4; ++v) {
+            float4 raw = oacc[v];
+            cacc[v * 4] += raw.x * scale;
+            cacc[v * 4 + 1] += raw.y * scale;
+            cacc[v * 4 + 2] += raw.z * scale;
+            cacc[v * 4 + 3] += raw.w * scale;
         }
     }
     float inv = 1.f / fmaxf(gl, 1e-20f);
@@ -296,9 +293,9 @@ sparse_mla_decode_fused_split_kernel(__grid_constant__ const Sparse_mla_decode_p
 
     if (active) {
         int64_t po = (((int64_t)t * p.num_heads + h) * p.num_splits + sp) * HEAD_DIM;
-        __nv_bfloat16 *oacc = reinterpret_cast<__nv_bfloat16 *>(p.oaccum_ptr) + po;
+        float *oacc = reinterpret_cast<float *>(p.oaccum_ptr) + po;
 #pragma unroll
-        for (int i = 0; i < VEC; ++i) oacc[lane + i * 32] = __float2bfloat16(acc[i]);
+        for (int i = 0; i < VEC; ++i) oacc[lane + i * 32] = acc[i];
         if (lane == 0) {
             int64_t pm = ((int64_t)t * p.num_heads + h) * p.num_splits + sp;
             p.mlse_ptr[pm * 2] = m;
@@ -376,12 +373,12 @@ struct Smem {
     float inv_s[BLOCK_M];
 };
 
-// standalone combine: one warp per (token, head), all splits merged with uint4 reads.
+// standalone combine: one warp per (token, head), all splits merged with float4 reads.
 // Unlike the fused last-CTA combine (which serializes 32 heads behind 2 CTAs), this
 // parallelizes the reduction across H*T warps, so the attention grid can use finer
 // splits without paying a per-split serial tail. The per-split mlse rows are read
 // ONE-SPLIT-PER-LANE and shfl-broadcast (no serial two-pass scalar chain), and the
-// accumulation is branchless so the oaccum uint4 loads pipeline across iterations.
+// accumulation is branchless so the oaccum float4 loads pipeline across iterations.
 __global__ void sparse_mla_combine_kernel(__grid_constant__ const Sparse_mla_decode_params p) {
     const int t = blockIdx.y;
     const int h = blockIdx.x;
@@ -414,23 +411,19 @@ __global__ void sparse_mla_combine_kernel(__grid_constant__ const Sparse_mla_dec
     float cacc[VEC];
 #pragma unroll
     for (int i = 0; i < VEC; ++i) cacc[i] = 0.f;
-    const __nv_bfloat16 *obase =
-        reinterpret_cast<const __nv_bfloat16 *>(p.oaccum_ptr) + pm0 * HEAD_DIM + lane * VEC;
+    const float *obase =
+        reinterpret_cast<const float *>(p.oaccum_ptr) + pm0 * HEAD_DIM + lane * VEC;
     for (int sp = 0; sp < ns; ++sp) {
         float m_sp = __shfl_sync(0xffffffffu, m_r[sp >> 5], sp & 31);
         float scale = (m_sp == -INFINITY) ? 0.f : exp2f(m_sp - gm);
-        const uint4 *oacc = reinterpret_cast<const uint4 *>(obase + (int64_t)sp * HEAD_DIM);
-        uint4 raw0 = oacc[0], raw1 = oacc[1];
-        const __nv_bfloat162 *b0 = reinterpret_cast<const __nv_bfloat162 *>(&raw0);
-        const __nv_bfloat162 *b1 = reinterpret_cast<const __nv_bfloat162 *>(&raw1);
+        const float4 *oacc = reinterpret_cast<const float4 *>(obase + (int64_t)sp * HEAD_DIM);
 #pragma unroll
         for (int j = 0; j < 4; ++j) {
-            float2 f0 = __bfloat1622float2(b0[j]);
-            float2 f1 = __bfloat1622float2(b1[j]);
-            cacc[j * 2] += f0.x * scale;
-            cacc[j * 2 + 1] += f0.y * scale;
-            cacc[8 + j * 2] += f1.x * scale;
-            cacc[8 + j * 2 + 1] += f1.y * scale;
+            float4 raw = oacc[j];
+            cacc[j * 4] += raw.x * scale;
+            cacc[j * 4 + 1] += raw.y * scale;
+            cacc[j * 4 + 2] += raw.z * scale;
+            cacc[j * 4 + 3] += raw.w * scale;
         }
     }
     float inv = 1.f / fmaxf(gl, 1e-20f);
@@ -690,25 +683,25 @@ sparse_mla_decode_mma_kernel(__grid_constant__ const Sparse_mla_decode_params p)
         return;
     }
 
-    // ---- split partials: un-normalized acc (bf16) + {m, l} per (t, h, sp) ----
+    // ---- split partials: un-normalized acc (fp32) + {m, l} per (t, h, sp) ----
     if (h0 < p.num_heads) {
-        __nv_bfloat16 *oacc = reinterpret_cast<__nv_bfloat16 *>(p.oaccum_ptr)
+        float *oacc = reinterpret_cast<float *>(p.oaccum_ptr)
             + (((int64_t)t * p.num_heads + h0) * p.num_splits + sp) * HEAD_DIM;
 #pragma unroll
         for (int d8 = 0; d8 < D_PER_WARP / 8; ++d8) {
             int col = dcol0 + d8 * 8 + qc;
-            oacc[col] = __float2bfloat16(acc[d8][0]);
-            oacc[col + 1] = __float2bfloat16(acc[d8][1]);
+            oacc[col] = acc[d8][0];
+            oacc[col + 1] = acc[d8][1];
         }
     }
     if (h1 < p.num_heads) {
-        __nv_bfloat16 *oacc = reinterpret_cast<__nv_bfloat16 *>(p.oaccum_ptr)
+        float *oacc = reinterpret_cast<float *>(p.oaccum_ptr)
             + (((int64_t)t * p.num_heads + h1) * p.num_splits + sp) * HEAD_DIM;
 #pragma unroll
         for (int d8 = 0; d8 < D_PER_WARP / 8; ++d8) {
             int col = dcol0 + d8 * 8 + qc;
-            oacc[col] = __float2bfloat16(acc[d8][2]);
-            oacc[col + 1] = __float2bfloat16(acc[d8][3]);
+            oacc[col] = acc[d8][2];
+            oacc[col + 1] = acc[d8][3];
         }
     }
     if (wk == 0 && wn == 0 && tig == 0) {
@@ -914,9 +907,9 @@ sparse_mla_decode_split_kernel(__grid_constant__ const Sparse_mla_decode_params 
     if (active) {
         // partial out: oaccum[t][h][sp][:] = un-normalized acc ; mlse[t][h][sp] = {m, l}
         int64_t po = (((int64_t)t * p.num_heads + h) * p.num_splits + sp) * HEAD_DIM;
-        __nv_bfloat16 *oacc = reinterpret_cast<__nv_bfloat16 *>(p.oaccum_ptr) + po;
+        float *oacc = reinterpret_cast<float *>(p.oaccum_ptr) + po;
 #pragma unroll
-        for (int i = 0; i < VEC; ++i) oacc[lane + i * 32] = __float2bfloat16(acc[i]);
+        for (int i = 0; i < VEC; ++i) oacc[lane + i * 32] = acc[i];
         if (lane == 0) {
             int64_t pm = ((int64_t)t * p.num_heads + h) * p.num_splits + sp;
             p.mlse_ptr[pm * 2] = m;

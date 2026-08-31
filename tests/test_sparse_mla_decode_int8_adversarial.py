@@ -14,6 +14,7 @@ from test_sparse_mla_prefill_adversarial import _ref
 from test_sparse_mla_prefill_int8_adversarial import (
     _build_inline_cache,
     _build_separate_cache,
+    _quantize_rows,
     cos_diff,
 )
 
@@ -173,3 +174,181 @@ def test_int8_decode_real_vllm_index_shapes():
     )
     cd = cos_diff(actual.float(), expected.float())
     assert cd < 8e-5, f"[T,1,topk] index shape changed int8 decode output: cos_diff={cd:.2e}"
+
+
+@pytest.mark.parametrize("T", [1, 8])
+def test_int8_decode_c128_512k_production_shape(T, monkeypatch):
+    """The exact long-context decode geometry used by DSV4 C128.
+
+    Non-speculative decode supplies one query row while seven-token DSpark
+    verification supplies eight.  Exercise both with the 512k physical SWA
+    address range and the adaptive 4096-row compressed-cache selection; the
+    older tests stopped at 1024 selected rows and low physical slot numbers.
+    """
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
+        pytest.skip("requires Ampere")
+    decode = _native_int8_decode()
+
+    torch.manual_seed(43)
+    dev = "cuda"
+    H = 64
+    swa_topk = 128
+    extra_topk = 4096
+    swa_slots = 512_128
+    extra_slots = 4096
+    scale = 1.0 / math.sqrt(HEAD_DIM)
+
+    def selected_inline_cache(num_slots, block_size, selected_slots):
+        num_blocks = (num_slots + block_size - 1) // block_size
+        raw = torch.zeros(
+            num_blocks, block_size, 528, dtype=torch.uint8, device=dev
+        )
+        data = raw[:, :, :HEAD_DIM].view(torch.int8)
+        scales = raw[:, :, HEAD_DIM : HEAD_DIM + 4].view(torch.float32).squeeze(-1)
+        selected = torch.randn(
+            selected_slots.numel(), HEAD_DIM, dtype=torch.bfloat16, device=dev
+        )
+        quantized, row_scales = _quantize_rows(selected)
+        blocks = torch.div(selected_slots, block_size, rounding_mode="floor")
+        offsets = selected_slots.remainder(block_size)
+        data[blocks, offsets] = quantized
+        scales[blocks, offsets] = row_scales
+        dequantized = (quantized.float() * row_scales[:, None]).to(torch.bfloat16)
+        return data, scales, dequantized
+
+    swa_slots_selected = torch.arange(
+        swa_slots - swa_topk, swa_slots, dtype=torch.int64, device=dev
+    )
+    extra_slots_selected = torch.arange(
+        extra_topk, dtype=torch.int64, device=dev
+    )
+    swa_cache, swa_scale, swa_selected = selected_inline_cache(
+        swa_slots, 64, swa_slots_selected
+    )
+    extra_cache, extra_scale, extra_selected = selected_inline_cache(
+        extra_slots, 2, extra_slots_selected
+    )
+
+    q = torch.randn(T, H, HEAD_DIM, dtype=torch.bfloat16, device=dev)
+    swa_idx = swa_slots_selected.to(torch.int32).repeat(T, 1)
+    extra_idx = extra_slots_selected.to(torch.int32).repeat(T, 1)
+    swa_lens = torch.full((T,), swa_topk, dtype=torch.int32, device=dev)
+    extra_lens = torch.full((T,), extra_topk, dtype=torch.int32, device=dev)
+    sink = torch.randn(H, dtype=torch.float32, device=dev) * 0.1
+
+    selected = torch.cat((swa_selected, extra_selected), dim=0)
+    local_idx = torch.arange(
+        swa_topk + extra_topk, dtype=torch.int32, device=dev
+    ).repeat(T, 1)
+    expected = _ref(
+        q,
+        selected,
+        local_idx,
+        torch.full(
+            (T,), swa_topk + extra_topk, dtype=torch.int32, device=dev
+        ),
+        None,
+        None,
+        None,
+        scale,
+        sink,
+    )
+    monkeypatch.delenv("FLASH_MLA_SLOTS_PER_SPLIT", raising=False)
+    out = decode(
+        q,
+        swa_cache,
+        swa_scale,
+        swa_idx,
+        swa_lens,
+        scale=scale,
+        attn_sink=sink,
+        extra_cache=extra_cache,
+        extra_scale=extra_scale,
+        extra_indices=extra_idx,
+        extra_lens=extra_lens,
+    )
+
+    cd = cos_diff(out.float(), expected)
+    assert cd < 8e-5, f"512k C128 decode cos_diff={cd:.2e} (T={T})"
+    torch.testing.assert_close(out.float(), expected, rtol=2e-2, atol=2e-2)
+
+    if T == 1:
+        # Pin the measured production policy. This also makes split
+        # selection observable without exposing a test-only native operator.
+        monkeypatch.setenv("FLASH_MLA_SLOTS_PER_SPLIT", "96")
+        tuned_split = decode(
+            q,
+            swa_cache,
+            swa_scale,
+            swa_idx,
+            swa_lens,
+            scale=scale,
+            attn_sink=sink,
+            extra_cache=extra_cache,
+            extra_scale=extra_scale,
+            extra_indices=extra_idx,
+            extra_lens=extra_lens,
+        )
+        assert torch.equal(out, tuned_split), (
+            "default long-context decode did not select the tuned split policy; "
+            f"max_diff={(out.float() - tuned_split.float()).abs().max().item():.8f}"
+        )
+
+
+@pytest.mark.parametrize("slots_per_split", [528, 132])
+def test_int8_decode_split_partial_precision(monkeypatch, slots_per_split):
+    """Split-KV must not materially diverge from the one-split native result.
+
+    Both paths perform the same native attention operation.  Partitioning the
+    selected rows is a scheduling optimization, so the extra split reduction
+    should introduce less than one output quantization step of aggregate error.
+    The 128+4096 geometry exercises the long-context C128 decode path where
+    repeatedly rounding split partials can otherwise perturb later layers.
+    """
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
+        pytest.skip("requires Ampere")
+    decode = _native_int8_decode()
+
+    torch.manual_seed(43)
+    dev = "cuda"
+    T, H = 1, 64
+    swa_topk, extra_topk = 128, 4096
+    scale = 1.0 / math.sqrt(HEAD_DIM)
+    swa_cache, swa_scale, _ = _build_inline_cache(swa_topk + 64, 64, dev)
+    extra_cache, extra_scale, _ = _build_inline_cache(extra_topk + 64, 2, dev)
+    q = torch.randn(T, H, HEAD_DIM, dtype=torch.bfloat16, device=dev)
+    swa_idx = torch.arange(swa_topk, dtype=torch.int32, device=dev).repeat(T, 1)
+    extra_idx = torch.arange(extra_topk, dtype=torch.int32, device=dev).repeat(T, 1)
+    swa_lens = torch.full((T,), swa_topk, dtype=torch.int32, device=dev)
+    extra_lens = torch.full((T,), extra_topk, dtype=torch.int32, device=dev)
+    sink = torch.randn(H, dtype=torch.float32, device=dev) * 0.1
+
+    kwargs = dict(
+        q=q,
+        swa_cache=swa_cache,
+        swa_scale=swa_scale,
+        swa_indices=swa_idx,
+        swa_lens=swa_lens,
+        scale=scale,
+        attn_sink=sink,
+        extra_cache=extra_cache,
+        extra_scale=extra_scale,
+        extra_indices=extra_idx,
+        extra_lens=extra_lens,
+    )
+    monkeypatch.setenv("FLASH_MLA_SLOTS_PER_SPLIT", str(slots_per_split))
+    split = decode(**kwargs)
+    monkeypatch.setenv("FLASH_MLA_SLOTS_PER_SPLIT", "100000")
+    unsplit = decode(**kwargs)
+
+    error = (split.float() - unsplit.float()).abs()
+    rmse = error.square().mean().sqrt().item()
+    max_error = error.max().item()
+    assert rmse < 5.0e-4, (
+        f"split-vs-unsplit RMSE={rmse:.8f} "
+        f"(slots_per_split={slots_per_split})"
+    )
+    assert max_error <= 3.90625e-3, (
+        f"split-vs-unsplit max error={max_error:.8f} "
+        f"(slots_per_split={slots_per_split})"
+    )
