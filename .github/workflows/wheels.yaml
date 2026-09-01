@@ -170,17 +170,23 @@ jobs:
 
       - uses: mozilla-actions/sccache-action@v0.0.9
 
+      - name: Restore the container compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/sccache
+          key: flash-mla-sccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('setup.py', 'csrc/**/*.cu', 'csrc/**/*.h') }}
+          restore-keys: |
+            flash-mla-sccache-v1-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Build + repair manylinux_2_28 wheel in the pytorch cuda13 builder
         run: |
           set -euo pipefail
           docker run --rm -v "$PWD":/io -w /io \
             -v "$(realpath "$(command -v sccache)"):/usr/local/bin/sccache:ro" \
+            -v "${RUNNER_TEMP}/sccache:/sccache-cache" \
             -e FLASH_MLA_CUDA_ARCHS="${FLASH_MLA_CUDA_ARCHS}" \
             -e FLASH_MLA_VERSION \
-            -e SCCACHE_GHA_ENABLED \
-            -e ACTIONS_CACHE_URL \
-            -e ACTIONS_RUNTIME_TOKEN \
-            -e ACTIONS_RESULTS_URL \
+            -e SCCACHE_DIR=/sccache-cache \
             pytorch/manylinux2_28-builder:cuda13.0 bash -c '
             set -euo pipefail
             export PATH=/opt/python/cp312-cp312/bin:$PATH
@@ -249,6 +255,14 @@ jobs:
 
       - uses: mozilla-actions/sccache-action@v0.0.9
 
+      - name: Restore the container compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/sccache
+          key: flash-mla-sccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('setup.py', 'csrc/**/*.cu', 'csrc/**/*.h') }}
+          restore-keys: |
+            flash-mla-sccache-v1-${{ runner.os }}-${{ runner.arch }}-
+
       # The hosted arm64 runner is 4 cores / 16 GB and was OOM-killed ~50 min in
       # ("lost communication with the server", no logs uploaded) building the
       # full 7-gencode matrix. Narrow it: no aarch64 NVIDIA host ships an
@@ -262,12 +276,10 @@ jobs:
           set -euo pipefail
           docker run --rm -v "$PWD":/io -w /io \
             -v "$(realpath "$(command -v sccache)"):/usr/local/bin/sccache:ro" \
+            -v "${RUNNER_TEMP}/sccache:/sccache-cache" \
             -e FLASH_MLA_CUDA_ARCHS="${FLASH_MLA_CUDA_ARCHS_AARCH64}" \
             -e FLASH_MLA_VERSION \
-            -e SCCACHE_GHA_ENABLED \
-            -e ACTIONS_CACHE_URL \
-            -e ACTIONS_RUNTIME_TOKEN \
-            -e ACTIONS_RESULTS_URL \
+            -e SCCACHE_DIR=/sccache-cache \
             pytorch/manylinuxaarch64-builder:cuda13.0 bash -c '
             set -euo pipefail
             export PATH=/opt/python/cp312-cp312/bin:$PATH
