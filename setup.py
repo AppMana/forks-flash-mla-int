@@ -8,6 +8,27 @@ from setuptools import setup, find_packages
 
 import torch
 
+
+def _enable_sccache() -> None:
+    """Use sccache automatically for local CUDA extension builds when present."""
+    if os.getenv("FLASH_MLA_DISABLE_SCCACHE", "FALSE") == "TRUE":
+        return
+    sccache = shutil.which("sccache")
+    if not sccache:
+        return
+
+    cxx = os.environ.get("CXX") or shutil.which("g++") or "c++"
+    cuda_home = os.environ.get("CUDA_HOME", "/usr/local/cuda")
+    nvcc = str(Path(cuda_home) / "bin" / "nvcc")
+    os.environ.setdefault("CXX", f"{sccache} {cxx}")
+    if Path(nvcc).exists():
+        os.environ.setdefault("PYTORCH_NVCC", f"{sccache} {nvcc}")
+        # sccache does not support nvcc's combined compile/dependency mode.
+        os.environ.setdefault("TORCH_EXTENSION_SKIP_NVCC_GEN_DEPENDENCIES", "1")
+
+
+_enable_sccache()
+
 # ---------------------------------------------------------------- target architectures
 #
 # There are two kernel families in csrc/:
@@ -366,10 +387,12 @@ ext_modules.append(
 )
 
 
-# Release builds produce exactly "2.0.0". Set FLASH_MLA_LOCAL_VERSION=TRUE to append a
-# PEP 440 local-version segment ("+<git sha>", or a timestamp outside a git checkout) so
-# throwaway development wheels stay distinguishable from the release.
-VERSION = "2.0.0"
+# Release builds default to "2.0.0". Tagged automation can provide a PEP 440
+# version through FLASH_MLA_VERSION without rewriting source files. Set
+# FLASH_MLA_LOCAL_VERSION=TRUE to append a local-version segment ("+<git sha>",
+# or a timestamp outside a git checkout) so throwaway development wheels stay
+# distinguishable from the release.
+VERSION = os.getenv("FLASH_MLA_VERSION", "2.0.0")
 if os.getenv("FLASH_MLA_LOCAL_VERSION", "FALSE") == "TRUE":
     try:
         cmd = ['git', 'rev-parse', '--short', 'HEAD']

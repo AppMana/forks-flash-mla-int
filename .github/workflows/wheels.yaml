@@ -39,6 +39,8 @@ jobs:
     outputs:
       tag_name: ${{ steps.meta.outputs.tag_name }}
       release_name: ${{ steps.meta.outputs.release_name }}
+      package_version: ${{ steps.meta.outputs.package_version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
     steps:
       - name: Compute tag and release name
         id: meta
@@ -50,14 +52,24 @@ jobs:
           else
             tag="v2.0.0"
           fi
+          package_version="${tag#v}"
+          prerelease=false
+          case "$package_version" in
+            *dev*|*rc*|*alpha*|*beta*) prerelease=true ;;
+          esac
           echo "tag_name=${tag}" >> "$GITHUB_OUTPUT"
           echo "release_name=flash_mla ${tag}" >> "$GITHUB_OUTPUT"
+          echo "package_version=${package_version}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------- jammy (glibc 2.35)
   jammy-wheel:
     name: Wheel (jammy, glibc 2.35)
     runs-on: ubuntu-22.04
     needs: release-meta
+    env:
+      FLASH_MLA_VERSION: ${{ needs.release-meta.outputs.package_version }}
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -66,6 +78,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Install uv
         run: python -m pip install --upgrade pip uv
@@ -95,7 +109,9 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf build dist
+          sccache --zero-stats
           python setup.py bdist_wheel --verbose
+          sccache --show-stats
           # tag as manylinux_2_35 (glibc 2.35) so pip resolves it correctly
           python -m pip install --quiet auditwheel || true
           ls -la dist/*.whl
@@ -133,6 +149,9 @@ jobs:
     name: Wheel (manylinux_2_28, glibc 2.28)
     runs-on: ubuntu-24.04
     needs: release-meta
+    env:
+      FLASH_MLA_VERSION: ${{ needs.release-meta.outputs.package_version }}
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - name: Free runner disk (cuda13 manylinux builder is ~20GB)
         uses: jlumbroso/free-disk-space@main
@@ -149,11 +168,19 @@ jobs:
         with:
           submodules: recursive
 
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
       - name: Build + repair manylinux_2_28 wheel in the pytorch cuda13 builder
         run: |
           set -euo pipefail
           docker run --rm -v "$PWD":/io -w /io \
+            -v "$(realpath "$(command -v sccache)"):/usr/local/bin/sccache:ro" \
             -e FLASH_MLA_CUDA_ARCHS="${FLASH_MLA_CUDA_ARCHS}" \
+            -e FLASH_MLA_VERSION \
+            -e SCCACHE_GHA_ENABLED \
+            -e ACTIONS_CACHE_URL \
+            -e ACTIONS_RUNTIME_TOKEN \
+            -e ACTIONS_RESULTS_URL \
             pytorch/manylinux2_28-builder:cuda13.0 bash -c '
             set -euo pipefail
             export PATH=/opt/python/cp312-cp312/bin:$PATH
@@ -161,7 +188,9 @@ jobs:
             uv pip install --system -q packaging setuptools wheel numpy ninja
             uv pip install --system -q --index-url https://download.pytorch.org/whl/'"${CUDA_INDEX}"' torch=='"${TORCH_VERSION}"'
             rm -rf build dist dist_manylinux
+            sccache --zero-stats
             FLASH_MLA_DISABLE_FP16=TRUE MAX_JOBS=2 NVCC_THREADS=2 python setup.py bdist_wheel
+            sccache --show-stats
             uv pip install --system -q auditwheel
             auditwheel repair dist/*.whl --plat manylinux_2_28_x86_64 \
               --exclude "libtorch*.so*" --exclude "libc10*.so*" --exclude "libcudart*.so*" \
@@ -199,6 +228,9 @@ jobs:
     name: Wheel (manylinux_2_28, aarch64)
     runs-on: ubuntu-24.04-arm
     needs: release-meta
+    env:
+      FLASH_MLA_VERSION: ${{ needs.release-meta.outputs.package_version }}
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - name: Free runner disk (cuda13 manylinux builder is ~20GB)
         uses: jlumbroso/free-disk-space@main
@@ -215,6 +247,8 @@ jobs:
         with:
           submodules: recursive
 
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
       # The hosted arm64 runner is 4 cores / 16 GB and was OOM-killed ~50 min in
       # ("lost communication with the server", no logs uploaded) building the
       # full 7-gencode matrix. Narrow it: no aarch64 NVIDIA host ships an
@@ -227,7 +261,13 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm -v "$PWD":/io -w /io \
+            -v "$(realpath "$(command -v sccache)"):/usr/local/bin/sccache:ro" \
             -e FLASH_MLA_CUDA_ARCHS="${FLASH_MLA_CUDA_ARCHS_AARCH64}" \
+            -e FLASH_MLA_VERSION \
+            -e SCCACHE_GHA_ENABLED \
+            -e ACTIONS_CACHE_URL \
+            -e ACTIONS_RUNTIME_TOKEN \
+            -e ACTIONS_RESULTS_URL \
             pytorch/manylinuxaarch64-builder:cuda13.0 bash -c '
             set -euo pipefail
             export PATH=/opt/python/cp312-cp312/bin:$PATH
@@ -235,7 +275,9 @@ jobs:
             uv pip install --system -q packaging setuptools wheel numpy ninja
             uv pip install --system -q --index-url https://download.pytorch.org/whl/'"${CUDA_INDEX}"' torch=='"${TORCH_VERSION}"'
             rm -rf build dist dist_manylinux
+            sccache --zero-stats
             FLASH_MLA_DISABLE_FP16=TRUE MAX_JOBS=1 NVCC_THREADS=1 python setup.py bdist_wheel
+            sccache --show-stats
             uv pip install --system -q auditwheel
             auditwheel repair dist/*.whl --plat manylinux_2_28_aarch64 \
               --exclude "libtorch*.so*" --exclude "libc10*.so*" --exclude "libcudart*.so*" \
@@ -279,7 +321,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: ${{ needs.release-meta.outputs.release_name }}
           draft: false
-          prerelease: false
+          prerelease: ${{ needs.release-meta.outputs.prerelease == 'true' }}
           files: release-artifacts/*.whl
           fail_on_unmatched_files: true
           make_latest: true
