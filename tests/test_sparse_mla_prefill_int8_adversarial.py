@@ -223,3 +223,66 @@ def test_int8_prefill_tp2_dspark_serving_shape(concurrency):
     assert torch.isfinite(out).all()
     assert cos_diff(out.float(), expected) < 8e-5
     torch.testing.assert_close(out.float(), expected, rtol=2e-2, atol=2e-2)
+
+
+def test_int8_prefill_c128a_512k_width_is_repeatable_and_matches_reference():
+    """Exercise the C128A candidate width reached near a 512k context.
+
+    The physical cache slots are deliberately permuted and launches are
+    repeated on the same buffers, matching a paged cache after allocator reuse.
+    """
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8:
+        pytest.skip("requires Ampere")
+    from flash_mla.int8_sparse_mla import sparse_mla_prefill_int8
+
+    torch.manual_seed(512)
+    dev = "cuda"
+    rows, heads = 2, 64
+    swa_topk, extra_topk = 128, 4000
+    scale = 1.0 / math.sqrt(HEAD_DIM)
+
+    swa_cache, swa_scale, swa_k = _build_inline_cache(384, 256, dev)
+    extra_cache, extra_scale, extra_k = _build_inline_cache(4224, 64, dev)
+    q = torch.randn(rows, heads, HEAD_DIM, device=dev, dtype=torch.bfloat16)
+    swa_lens = torch.full((rows,), swa_topk, dtype=torch.int32, device=dev)
+    extra_lens = torch.full((rows,), extra_topk, dtype=torch.int32, device=dev)
+    swa_idx = torch.stack(
+        [torch.randperm(swa_k.shape[0], device=dev)[:swa_topk] for _ in range(rows)]
+    ).to(torch.int32)
+    extra_idx = torch.stack(
+        [
+            torch.randperm(extra_k.shape[0], device=dev)[:extra_topk]
+            for _ in range(rows)
+        ]
+    ).to(torch.int32)
+    sink = torch.randn(heads, device=dev, dtype=torch.float32) * 0.1
+
+    expected = _ref(
+        q,
+        swa_k,
+        swa_idx,
+        swa_lens,
+        extra_k,
+        extra_idx,
+        extra_lens,
+        scale,
+        sink,
+    )
+    kwargs = dict(
+        scale=scale,
+        attn_sink=sink,
+        extra_cache=extra_cache,
+        extra_scale=extra_scale,
+        extra_indices=extra_idx,
+        extra_lens=extra_lens,
+    )
+    first = sparse_mla_prefill_int8(
+        q, swa_cache, swa_scale, swa_idx, swa_lens, **kwargs
+    )
+    second = sparse_mla_prefill_int8(
+        q, swa_cache, swa_scale, swa_idx, swa_lens, **kwargs
+    )
+
+    torch.testing.assert_close(second, first, rtol=0, atol=0)
+    assert cos_diff(first.float(), expected) < 8e-5
+    torch.testing.assert_close(first.float(), expected, rtol=2e-2, atol=2e-2)
