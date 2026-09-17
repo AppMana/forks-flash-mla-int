@@ -1,0 +1,676 @@
+# command_base=TRITON_CACHE_DIR=/home/administrator/Documents/forks-flash-mla-ampere-dsv4/.triton-cache-sm86 CUDA_VISIBLE_DEVICES=1 python benchmarks/bench_sparse_mla_16k_matrix.py --device 0 --context 16384 --prefill-tokens 256 --warmup 10 --iters 30 --only VARIANT --decode-tokens C
+# decode_tokens=1
+# RUN c=1 variant=prefill-fp8-native
+WARNING 07-05 17:44:19 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:44:23 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:44:23 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:44:23 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:44:23 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=1,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+prefill,fp8,native_staged,256,1.501,170547.566
+# RUN c=1 variant=prefill-fp8-triton-dequant
+WARNING 07-05 17:44:36 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:44:40 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:44:40 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:44:40 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:44:40 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=1,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+prefill,fp8,triton_bh32_bn16_dequant_gather,256,2.492,102711.591
+# RUN c=1 variant=prefill-fp8-triton-gathered
+WARNING 07-05 17:44:53 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:44:57 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:44:58 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:44:58 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:44:58 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=1,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+prefill,fp8,triton_bh32_bn16_gathered_only,256,2.304,111089.722
+# RUN c=1 variant=prefill-int8-native
+WARNING 07-05 17:45:10 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:45:15 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:45:15 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:45:15 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:45:15 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=1,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+prefill,int8,native_staged,256,1.336,191663.895
+# RUN c=1 variant=prefill-int8-triton
+WARNING 07-05 17:45:27 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:45:32 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:45:32 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:45:32 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:45:32 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=1,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+prefill,int8,triton_imma_bh32_bn32,256,0.489,523999.152
+# RUN c=1 variant=decode-fp8-native
+WARNING 07-05 17:45:45 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:45:49 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:45:49 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:45:49 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:45:49 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=1,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+decode,fp8,native,1,0.042,23550.542
+# RUN c=1 variant=decode-fp8-triton
+WARNING 07-05 17:46:02 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:46:07 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:46:07 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:46:07 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:46:07 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=1,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+INFO 07-05 17:46:17 [triton_kernels.py:536] DeepSeek-V4 sm86 sparse MLA decode dispatch: backend=triton_fp8 BLOCK_H=16 BLOCK_N=16 tokens=1 heads=64 head_dim=512 swa_topk=128 extra_topk=128 has_extra=True has_sink=True
+decode,fp8,triton_default,1,0.165,6045.579
+# RUN c=1 variant=decode-fp8-triton-bh8-bn32
+WARNING 07-05 17:46:19 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:46:24 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:46:24 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:46:24 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:46:24 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=1,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+Traceback (most recent call last):
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 620, in <module>
+    main()
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 460, in main
+    time_us(
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_sm86_shapes.py", line 204, in time_us
+    fn()
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 461, in <lambda>
+    lambda: decode_sparse_attention_triton_const(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 140, in decode_sparse_attention_triton_const
+    tk._decode_sparse_attention_fp8_kernel[grid](
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 370, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 743, in run
+    launch_metadata = kernel.launch_metadata(grid, stream, *bound_args.values())
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 482, in launch_metadata
+    self._init_handles()
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 456, in _init_handles
+    raise_(OutOfResources(self.metadata.shared, max_shared, "shared memory"))
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 448, in raise_
+    raise err
+triton.runtime.errors.OutOfResources: out of resource: shared memory, Required: 107008, Hardware limit: 101376. Reducing block sizes or `num_stages` may help.
+ERROR,c=1,variant=decode-fp8-triton-bh8-bn32
+# RUN c=1 variant=decode-fp8-triton-bh16
+WARNING 07-05 17:46:37 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:46:41 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:46:41 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:46:41 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:46:41 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=1,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+decode,fp8,triton_bh16_bn16,1,0.165,6050.730
+# RUN c=1 variant=decode-fp8-triton-bh16-bn8
+WARNING 07-05 17:46:54 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:46:59 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:46:59 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:46:59 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:46:59 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=1,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+Traceback (most recent call last):
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/language/core.py", line 43, in wrapper
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/language/core.py", line 2054, in dot
+    res = _semantic.dot(input, other, acc, input_precision, max_num_imprecise_acc, out_dtype)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/language/semantic.py", line 1528, in dot
+    assert lhs.shape[-2].value >= min_dot_size[0] and lhs.shape[-1].value >= min_dot_size[2] \
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Input shapes should have M >= 1, N >= 1 and K >= 16
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 620, in <module>
+    main()
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 514, in main
+    time_us(
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_sm86_shapes.py", line 204, in time_us
+    fn()
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 515, in <lambda>
+    lambda: decode_sparse_attention_triton_const(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 140, in decode_sparse_attention_triton_const
+    tk._decode_sparse_attention_fp8_kernel[grid](
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 370, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 720, in run
+    kernel = self._do_compile(key, signature, device, constexprs, options, attrs, warmup)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 849, in _do_compile
+    kernel = self.compile(src, target=target, options=options.__dict__)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 304, in compile
+    module = src.make_ir(target, options, codegen_fns, module_map, context)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 80, in make_ir
+    return ast_to_ttir(self.fn, self, context=context, options=options, codegen_fns=codegen_fns,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+triton.compiler.errors.CompilationError: at 167:40:
+        qk = tl.dot(q, tl.trans(k.to(q.dtype))) * sm_scale_log2
+        qk = tl.where(
+            mask_h[:, None] & valid[None, :],
+            qk,
+            -3.4028234663852886e38,
+        )
+
+        n_e_max = tl.maximum(tl.max(qk, 1), e_max)
+        re_scale = tl.exp2(e_max - n_e_max)
+        p = tl.exp2(qk - n_e_max[:, None])
+        p = tl.where(mask_h[:, None] & valid[None, :], p, 0.0)
+        acc = acc * re_scale[:, None] + tl.dot(p.to(k.dtype), k)
+                                        ^
+Input shapes should have M >= 1, N >= 1 and K >= 16
+ERROR,c=1,variant=decode-fp8-triton-bh16-bn8
+# RUN c=1 variant=decode-fp8-triton-bh16-bn32
+WARNING 07-05 17:47:11 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:47:16 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:47:16 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:47:16 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:47:16 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=1,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+Traceback (most recent call last):
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 620, in <module>
+    main()
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 541, in main
+    time_us(
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_sm86_shapes.py", line 204, in time_us
+    fn()
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 542, in <lambda>
+    lambda: decode_sparse_attention_triton_const(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 140, in decode_sparse_attention_triton_const
+    tk._decode_sparse_attention_fp8_kernel[grid](
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 370, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 743, in run
+    launch_metadata = kernel.launch_metadata(grid, stream, *bound_args.values())
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 482, in launch_metadata
+    self._init_handles()
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 456, in _init_handles
+    raise_(OutOfResources(self.metadata.shared, max_shared, "shared memory"))
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 448, in raise_
+    raise err
+triton.runtime.errors.OutOfResources: out of resource: shared memory, Required: 115200, Hardware limit: 101376. Reducing block sizes or `num_stages` may help.
+ERROR,c=1,variant=decode-fp8-triton-bh16-bn32
+# RUN c=1 variant=decode-fp8-triton-bh32
+WARNING 07-05 17:47:30 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:47:34 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:47:35 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:47:35 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:47:35 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=1,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+decode,fp8,triton_bh32_bn16,1,0.267,3743.053
+# RUN c=1 variant=decode-int8-triton
+WARNING 07-05 17:47:48 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:47:53 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:47:53 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:47:53 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:47:53 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=1,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+decode,int8,triton_imma_bh32_bn32,1,0.060,16798.667
+# decode_tokens=2
+# RUN c=2 variant=prefill-fp8-native
+WARNING 07-05 17:48:06 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:48:11 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:48:11 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:48:11 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:48:11 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=2,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+prefill,fp8,native_staged,256,1.501,170567.202
+# RUN c=2 variant=prefill-fp8-triton-dequant
+WARNING 07-05 17:48:24 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:48:28 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:48:28 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:48:28 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:48:28 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=2,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+prefill,fp8,triton_bh32_bn16_dequant_gather,256,2.493,102670.808
+# RUN c=2 variant=prefill-fp8-triton-gathered
+WARNING 07-05 17:48:41 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:48:46 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:48:46 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:48:46 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:48:46 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=2,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+prefill,fp8,triton_bh32_bn16_gathered_only,256,2.305,111071.617
+# RUN c=2 variant=prefill-int8-native
+WARNING 07-05 17:48:59 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:49:03 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:49:03 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:49:03 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:49:03 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=2,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+prefill,int8,native_staged,256,1.336,191668.803
+# RUN c=2 variant=prefill-int8-triton
+WARNING 07-05 17:49:16 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:49:21 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:49:21 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:49:21 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:49:21 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=2,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+prefill,int8,triton_imma_bh32_bn32,256,0.490,522466.036
+# RUN c=2 variant=decode-fp8-native
+WARNING 07-05 17:49:34 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:49:38 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:49:38 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:49:38 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:49:38 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=2,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+decode,fp8,native,2,0.043,46576.907
+# RUN c=2 variant=decode-fp8-triton
+WARNING 07-05 17:49:51 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:49:55 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:49:56 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:49:56 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:49:56 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=2,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+INFO 07-05 17:50:06 [triton_kernels.py:536] DeepSeek-V4 sm86 sparse MLA decode dispatch: backend=triton_fp8 BLOCK_H=16 BLOCK_N=16 tokens=2 heads=64 head_dim=512 swa_topk=128 extra_topk=128 has_extra=True has_sink=True
+decode,fp8,triton_default,2,0.167,12004.456
+# RUN c=2 variant=decode-fp8-triton-bh8-bn32
+WARNING 07-05 17:50:08 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:50:12 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:50:13 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:50:13 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:50:13 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=2,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+Traceback (most recent call last):
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 620, in <module>
+    main()
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 460, in main
+    time_us(
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_sm86_shapes.py", line 204, in time_us
+    fn()
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 461, in <lambda>
+    lambda: decode_sparse_attention_triton_const(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 140, in decode_sparse_attention_triton_const
+    tk._decode_sparse_attention_fp8_kernel[grid](
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 370, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 743, in run
+    launch_metadata = kernel.launch_metadata(grid, stream, *bound_args.values())
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 482, in launch_metadata
+    self._init_handles()
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 456, in _init_handles
+    raise_(OutOfResources(self.metadata.shared, max_shared, "shared memory"))
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 448, in raise_
+    raise err
+triton.runtime.errors.OutOfResources: out of resource: shared memory, Required: 107008, Hardware limit: 101376. Reducing block sizes or `num_stages` may help.
+ERROR,c=2,variant=decode-fp8-triton-bh8-bn32
+# RUN c=2 variant=decode-fp8-triton-bh16
+WARNING 07-05 17:50:25 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:50:29 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:50:30 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:50:30 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:50:30 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=2,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+decode,fp8,triton_bh16_bn16,2,0.167,11989.717
+# RUN c=2 variant=decode-fp8-triton-bh16-bn8
+WARNING 07-05 17:50:42 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:50:47 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:50:47 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:50:47 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:50:47 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=2,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+Traceback (most recent call last):
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/language/core.py", line 43, in wrapper
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/language/core.py", line 2054, in dot
+    res = _semantic.dot(input, other, acc, input_precision, max_num_imprecise_acc, out_dtype)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/language/semantic.py", line 1528, in dot
+    assert lhs.shape[-2].value >= min_dot_size[0] and lhs.shape[-1].value >= min_dot_size[2] \
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Input shapes should have M >= 1, N >= 1 and K >= 16
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 620, in <module>
+    main()
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 514, in main
+    time_us(
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_sm86_shapes.py", line 204, in time_us
+    fn()
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 515, in <lambda>
+    lambda: decode_sparse_attention_triton_const(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 140, in decode_sparse_attention_triton_const
+    tk._decode_sparse_attention_fp8_kernel[grid](
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 370, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 720, in run
+    kernel = self._do_compile(key, signature, device, constexprs, options, attrs, warmup)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 849, in _do_compile
+    kernel = self.compile(src, target=target, options=options.__dict__)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 304, in compile
+    module = src.make_ir(target, options, codegen_fns, module_map, context)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 80, in make_ir
+    return ast_to_ttir(self.fn, self, context=context, options=options, codegen_fns=codegen_fns,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+triton.compiler.errors.CompilationError: at 167:40:
+        qk = tl.dot(q, tl.trans(k.to(q.dtype))) * sm_scale_log2
+        qk = tl.where(
+            mask_h[:, None] & valid[None, :],
+            qk,
+            -3.4028234663852886e38,
+        )
+
+        n_e_max = tl.maximum(tl.max(qk, 1), e_max)
+        re_scale = tl.exp2(e_max - n_e_max)
+        p = tl.exp2(qk - n_e_max[:, None])
+        p = tl.where(mask_h[:, None] & valid[None, :], p, 0.0)
+        acc = acc * re_scale[:, None] + tl.dot(p.to(k.dtype), k)
+                                        ^
+Input shapes should have M >= 1, N >= 1 and K >= 16
+ERROR,c=2,variant=decode-fp8-triton-bh16-bn8
+# RUN c=2 variant=decode-fp8-triton-bh16-bn32
+WARNING 07-05 17:51:00 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:51:04 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:51:04 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:51:04 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:51:04 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=2,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+Traceback (most recent call last):
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 620, in <module>
+    main()
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 541, in main
+    time_us(
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_sm86_shapes.py", line 204, in time_us
+    fn()
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 542, in <lambda>
+    lambda: decode_sparse_attention_triton_const(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 140, in decode_sparse_attention_triton_const
+    tk._decode_sparse_attention_fp8_kernel[grid](
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 370, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 743, in run
+    launch_metadata = kernel.launch_metadata(grid, stream, *bound_args.values())
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 482, in launch_metadata
+    self._init_handles()
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 456, in _init_handles
+    raise_(OutOfResources(self.metadata.shared, max_shared, "shared memory"))
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 448, in raise_
+    raise err
+triton.runtime.errors.OutOfResources: out of resource: shared memory, Required: 115200, Hardware limit: 101376. Reducing block sizes or `num_stages` may help.
+ERROR,c=2,variant=decode-fp8-triton-bh16-bn32
+# RUN c=2 variant=decode-fp8-triton-bh32
+WARNING 07-05 17:51:17 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:51:22 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:51:22 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:51:22 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:51:22 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=2,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+decode,fp8,triton_bh32_bn16,2,0.270,7418.808
+# RUN c=2 variant=decode-int8-triton
+WARNING 07-05 17:51:34 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:51:39 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:51:39 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:51:39 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:51:39 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=2,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+decode,int8,triton_imma_bh32_bn32,2,0.059,33791.089
+# decode_tokens=4
+# RUN c=4 variant=prefill-fp8-native
+WARNING 07-05 17:51:52 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:51:57 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:51:57 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:51:57 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:51:57 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=4,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+prefill,fp8,native_staged,256,1.502,170462.297
+# RUN c=4 variant=prefill-fp8-triton-dequant
+WARNING 07-05 17:52:09 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:52:14 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:52:14 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:52:14 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:52:14 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=4,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+prefill,fp8,triton_bh32_bn16_dequant_gather,256,2.492,102720.028
+# RUN c=4 variant=prefill-fp8-triton-gathered
+WARNING 07-05 17:52:27 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:52:31 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:52:32 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:52:32 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:52:32 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=4,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+prefill,fp8,triton_bh32_bn16_gathered_only,256,2.311,110781.234
+# RUN c=4 variant=prefill-int8-native
+WARNING 07-05 17:52:44 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:52:49 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:52:49 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:52:49 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:52:49 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=4,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+prefill,int8,native_staged,256,1.336,191684.096
+# RUN c=4 variant=prefill-int8-triton
+WARNING 07-05 17:53:02 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:53:07 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:53:07 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:53:07 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:53:07 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=4,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+prefill,int8,triton_imma_bh32_bn32,256,0.488,524218.923
+# RUN c=4 variant=decode-fp8-native
+WARNING 07-05 17:53:19 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:53:24 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:53:24 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:53:24 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:53:24 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=4,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+decode,fp8,native,4,0.069,58302.241
+# RUN c=4 variant=decode-fp8-triton
+WARNING 07-05 17:53:37 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:53:41 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:53:42 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:53:42 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:53:42 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=4,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+INFO 07-05 17:53:52 [triton_kernels.py:536] DeepSeek-V4 sm86 sparse MLA decode dispatch: backend=triton_fp8 BLOCK_H=16 BLOCK_N=16 tokens=4 heads=64 head_dim=512 swa_topk=128 extra_topk=128 has_extra=True has_sink=True
+decode,fp8,triton_default,4,0.168,23755.677
+# RUN c=4 variant=decode-fp8-triton-bh8-bn32
+WARNING 07-05 17:53:54 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:53:59 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:53:59 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:53:59 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:53:59 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=4,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+Traceback (most recent call last):
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 620, in <module>
+    main()
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 460, in main
+    time_us(
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_sm86_shapes.py", line 204, in time_us
+    fn()
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 461, in <lambda>
+    lambda: decode_sparse_attention_triton_const(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 140, in decode_sparse_attention_triton_const
+    tk._decode_sparse_attention_fp8_kernel[grid](
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 370, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 743, in run
+    launch_metadata = kernel.launch_metadata(grid, stream, *bound_args.values())
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 482, in launch_metadata
+    self._init_handles()
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 456, in _init_handles
+    raise_(OutOfResources(self.metadata.shared, max_shared, "shared memory"))
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 448, in raise_
+    raise err
+triton.runtime.errors.OutOfResources: out of resource: shared memory, Required: 107008, Hardware limit: 101376. Reducing block sizes or `num_stages` may help.
+ERROR,c=4,variant=decode-fp8-triton-bh8-bn32
+# RUN c=4 variant=decode-fp8-triton-bh16
+WARNING 07-05 17:54:11 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:54:16 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:54:16 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:54:16 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:54:16 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=4,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+decode,fp8,triton_bh16_bn16,4,0.167,23940.246
+# RUN c=4 variant=decode-fp8-triton-bh16-bn8
+WARNING 07-05 17:54:29 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:54:33 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:54:33 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:54:33 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:54:33 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=4,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+Traceback (most recent call last):
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/language/core.py", line 43, in wrapper
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/language/core.py", line 2054, in dot
+    res = _semantic.dot(input, other, acc, input_precision, max_num_imprecise_acc, out_dtype)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/language/semantic.py", line 1528, in dot
+    assert lhs.shape[-2].value >= min_dot_size[0] and lhs.shape[-1].value >= min_dot_size[2] \
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Input shapes should have M >= 1, N >= 1 and K >= 16
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 620, in <module>
+    main()
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 514, in main
+    time_us(
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_sm86_shapes.py", line 204, in time_us
+    fn()
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 515, in <lambda>
+    lambda: decode_sparse_attention_triton_const(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 140, in decode_sparse_attention_triton_const
+    tk._decode_sparse_attention_fp8_kernel[grid](
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 370, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 720, in run
+    kernel = self._do_compile(key, signature, device, constexprs, options, attrs, warmup)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 849, in _do_compile
+    kernel = self.compile(src, target=target, options=options.__dict__)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 304, in compile
+    module = src.make_ir(target, options, codegen_fns, module_map, context)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 80, in make_ir
+    return ast_to_ttir(self.fn, self, context=context, options=options, codegen_fns=codegen_fns,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+triton.compiler.errors.CompilationError: at 167:40:
+        qk = tl.dot(q, tl.trans(k.to(q.dtype))) * sm_scale_log2
+        qk = tl.where(
+            mask_h[:, None] & valid[None, :],
+            qk,
+            -3.4028234663852886e38,
+        )
+
+        n_e_max = tl.maximum(tl.max(qk, 1), e_max)
+        re_scale = tl.exp2(e_max - n_e_max)
+        p = tl.exp2(qk - n_e_max[:, None])
+        p = tl.where(mask_h[:, None] & valid[None, :], p, 0.0)
+        acc = acc * re_scale[:, None] + tl.dot(p.to(k.dtype), k)
+                                        ^
+Input shapes should have M >= 1, N >= 1 and K >= 16
+ERROR,c=4,variant=decode-fp8-triton-bh16-bn8
+# RUN c=4 variant=decode-fp8-triton-bh16-bn32
+WARNING 07-05 17:54:46 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:54:50 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:54:50 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:54:50 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:54:50 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=4,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+Traceback (most recent call last):
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 620, in <module>
+    main()
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 541, in main
+    time_us(
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_sm86_shapes.py", line 204, in time_us
+    fn()
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 542, in <lambda>
+    lambda: decode_sparse_attention_triton_const(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-flash-mla-ampere-dsv4/benchmarks/bench_sparse_mla_16k_matrix.py", line 140, in decode_sparse_attention_triton_const
+    tk._decode_sparse_attention_fp8_kernel[grid](
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 370, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 743, in run
+    launch_metadata = kernel.launch_metadata(grid, stream, *bound_args.values())
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 482, in launch_metadata
+    self._init_handles()
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 456, in _init_handles
+    raise_(OutOfResources(self.metadata.shared, max_shared, "shared memory"))
+  File "/home/administrator/Documents/forks-vllm-ampere/.venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 448, in raise_
+    raise err
+triton.runtime.errors.OutOfResources: out of resource: shared memory, Required: 115200, Hardware limit: 101376. Reducing block sizes or `num_stages` may help.
+ERROR,c=4,variant=decode-fp8-triton-bh16-bn32
+# RUN c=4 variant=decode-fp8-triton-bh32
+WARNING 07-05 17:55:03 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:55:08 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:55:08 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:55:08 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:55:08 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=4,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+decode,fp8,triton_bh32_bn16,4,0.268,14924.541
+# RUN c=4 variant=decode-int8-triton
+WARNING 07-05 17:55:21 [cuda.py:45] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:55:25 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:55:25 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:55:25 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+WARNING 07-05 17:55:25 [cuda.py:233] Failed to import from vllm._qutlass_C: ModuleNotFoundError("No module named 'vllm._qutlass_C'")
+# mode,cache,backend,tokens,ms,tok_per_s
+# shape=context=16384,prefill=256,decode=4,H=64,D=512,swa_topk=128,extra_topk=128,extra_block=2
+decode,int8,triton_imma_bh32_bn32,4,0.060,67156.160
